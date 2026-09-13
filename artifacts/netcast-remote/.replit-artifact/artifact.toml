@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/netcast-remote/"
+title = "NetCast Kumanda"
+description = "LG NetCast televizyonları aynı Wi-Fi ağı üzerinden keşfedip eşleştiren ve telefon üzerinden kumanda etmeyi sağlayan Android uygulaması."
+version = "1.0.0"
+id = "artifacts/netcast-remote"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/netcast-remote/" ]
+localPort = 19476
+
+[services.development]
+run = "pnpm --filter @workspace/netcast-remote run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/netcast-remote", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/netcast-remote", "run", "serve" ]
+
+[services.env]
+PORT = "19476"
+BASE_PATH = "/netcast-remote/"

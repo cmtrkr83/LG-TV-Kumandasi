@@ -1,0 +1,1 @@
+- [NetCast protocol coverage](netcast-protocol.md) — ROAP is the network-control path for NetCast 3/4; pre-2012 models may require HDCP.
