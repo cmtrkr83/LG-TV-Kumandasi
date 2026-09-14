@@ -1,6 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
-import { isAvailable as isSsdpAvailable, searchStream, getNetworkInterfaces, type SsdpDevice } from 'expo-ssdp';
+import {
+  getNetworkInterfaces,
+  isAvailable as isSsdpAvailable,
+  listenForNotifications,
+  searchStream,
+  type SsdpDevice,
+  type SsdpNotifyEvent,
+} from 'expo-ssdp';
 import { Feather } from '@expo/vector-icons';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -32,6 +39,7 @@ type DiscoveredTv = {
   id: string;
   host: string;
   name: string;
+  online: boolean;
   model?: string;
   server?: string;
 };
@@ -117,9 +125,40 @@ function toNetCastTv(device: SsdpDevice): DiscoveredTv | null {
     id: device.usn?.split('::')[0] || `${device.address}:${device.location ?? ''}`,
     host: device.address,
     name: model || 'LG NetCast TV',
+    online: true,
     model: model || undefined,
     server: server || undefined,
   };
+}
+
+function upsertDiscoveredTv(previous: DiscoveredTv[], tv: DiscoveredTv) {
+  const existingIndex = previous.findIndex((item) => item.id === tv.id || item.host === tv.host);
+  if (existingIndex === -1) return [...previous, tv];
+
+  const next = [...previous];
+  next[existingIndex] = { ...next[existingIndex], ...tv, online: true };
+  return next;
+}
+
+function notifyDeviceId(event: SsdpNotifyEvent) {
+  return event.usn?.split('::')[0] ?? '';
+}
+
+function notifyLooksLikeNetCast(event: SsdpNotifyEvent) {
+  const eventText = [
+    event.usn,
+    event.nt,
+    event.location,
+    ...Object.values(event.headers ?? {}),
+  ]
+    .join(' ')
+    .toLowerCase();
+  return /lg|lge|netcast/.test(eventText);
+}
+
+function tvMatchesNotification(tv: DiscoveredTv, event: SsdpNotifyEvent) {
+  const deviceId = notifyDeviceId(event);
+  return tv.host === event.address || (Boolean(deviceId) && tv.id === deviceId);
 }
 
 async function requestPairingKey(host: string) {
@@ -326,6 +365,9 @@ export default function HomeScreen() {
   const [scanning, setScanning] = useState(false);
   const [selectedTvId, setSelectedTvId] = useState('');
   const scanId = useRef(0);
+  const knownTvAddresses = useRef(new Set<string>());
+  const knownTvIds = useRef(new Set<string>());
+  const refreshingNotificationHosts = useRef(new Set<string>());
 
   const connected = Boolean(connection?.session);
   const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host]);
@@ -392,9 +434,10 @@ export default function HomeScreen() {
         if (!tv) continue;
         if (foundHosts.has(tv.host)) continue;
         foundHosts.add(tv.host);
+        knownTvAddresses.current.add(tv.host);
+        knownTvIds.current.add(tv.id);
         setDiscoveredTvs((previous) => {
-          if (previous.some((item) => item.id === tv.id || item.host === tv.host)) return previous;
-          return [...previous, tv];
+          return upsertDiscoveredTv(previous, tv);
         });
       }
 
@@ -422,7 +465,95 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const markTvOnline = useCallback((event: SsdpNotifyEvent, online: boolean) => {
+    setDiscoveredTvs((previous) => {
+      const next = previous.map((tv) => {
+        if (!tvMatchesNotification(tv, event)) return tv;
+        return tv.online === online ? tv : { ...tv, online };
+      });
+      return next;
+    });
+  }, []);
+
+  const refreshTvFromNotification = useCallback(async (event: SsdpNotifyEvent) => {
+    if (Platform.OS === 'web' || !isSsdpAvailable || refreshingNotificationHosts.current.has(event.address)) {
+      return;
+    }
+
+    refreshingNotificationHosts.current.add(event.address);
+    try {
+      for await (const device of searchStream({
+        searchTargets: ['ssdp:all'],
+        timeoutMs: 2200,
+        mx: 1,
+        repeatProbe: false,
+        multicastEnabled: false,
+        broadcastEnabled: false,
+        unicastTargets: [event.address],
+      })) {
+        const tv = toNetCastTv(device);
+        if (!tv) continue;
+        knownTvAddresses.current.add(tv.host);
+        knownTvIds.current.add(tv.id);
+        setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv));
+      }
+    } catch {
+      // NOTIFY is best-effort; the next announcement or manual scan can retry.
+    } finally {
+      refreshingNotificationHosts.current.delete(event.address);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'web' || !isSsdpAvailable) return;
+
+    let subscription: { remove: () => void } | undefined;
+    try {
+      subscription = listenForNotifications({
+        onAlive: (event) => {
+          const knownDevice =
+            knownTvAddresses.current.has(event.address) ||
+            knownTvIds.current.has(notifyDeviceId(event));
+          if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
+
+          markTvOnline(event, true);
+          setStatus('NetCast TV listesi güncelleniyor…');
+          void refreshTvFromNotification(event);
+        },
+        onUpdate: (event) => {
+          const knownDevice =
+            knownTvAddresses.current.has(event.address) ||
+            knownTvIds.current.has(notifyDeviceId(event));
+          if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
+
+          markTvOnline(event, true);
+          void refreshTvFromNotification(event);
+        },
+        onByeBye: (event) => {
+          const knownDevice =
+            knownTvAddresses.current.has(event.address) ||
+            knownTvIds.current.has(notifyDeviceId(event));
+          if (!knownDevice) return;
+
+          markTvOnline(event, false);
+          setStatus('Bir NetCast TV çevrimdışı görünüyor.');
+        },
+        onError: () => {
+          setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
+        },
+      });
+    } catch {
+      setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
+    }
+
+    return () => {
+      subscription?.remove();
+      refreshingNotificationHosts.current.clear();
+    };
+  }, [markTvOnline, refreshTvFromNotification]);
+
   const selectTv = useCallback((tv: DiscoveredTv) => {
+    if (!tv.online) return;
     setHost(tv.host);
     setTvName(tv.name);
     setPairingKey('');
@@ -545,16 +676,21 @@ export default function HomeScreen() {
             {discoveredTvs.length > 0 ? (
               <View style={styles.discoverySection}>
                 <Text style={styles.inputLabel}>BULUNAN TV’LER</Text>
+                <Text style={styles.discoveryStatus}>
+                  {discoveredTvs.filter((tv) => tv.online).length}/{discoveredTvs.length} çevrimiçi · canlı güncellemeler açık
+                </Text>
                 {discoveredTvs.map((tv) => (
                   <Pressable
                     key={tv.id}
                     testID={`discovered-tv-${tv.host}`}
                     accessibilityRole="button"
-                    accessibilityLabel={`${tv.name}, ${tv.host}`}
+                    accessibilityLabel={`${tv.name}, ${tv.host}, ${tv.online ? 'çevrimiçi' : 'çevrimdışı'}`}
+                    disabled={!tv.online}
                     onPress={() => selectTv(tv)}
                     style={({ pressed }) => [
                       styles.tvOption,
                       selectedTvId === tv.id && styles.tvOptionSelected,
+                      !tv.online && styles.tvOptionOffline,
                       pressed && styles.pressed,
                     ]}
                   >
@@ -563,7 +699,13 @@ export default function HomeScreen() {
                     </View>
                     <View style={styles.tvOptionInfo}>
                       <Text style={styles.tvOptionName}>{tv.name}</Text>
-                      <Text style={styles.tvOptionMeta}>{tv.host}{tv.model && tv.model !== tv.name ? ` · ${tv.model}` : ''}</Text>
+                      <Text style={styles.tvOptionMeta}>
+                        {tv.host}{tv.model && tv.model !== tv.name ? ` · ${tv.model}` : ''}
+                      </Text>
+                    </View>
+                    <View style={styles.tvOptionStatus}>
+                      <View style={[styles.tvStatusDot, tv.online ? styles.tvStatusDotOnline : styles.tvStatusDotOffline]} />
+                      <Text style={styles.tvStatusText}>{tv.online ? 'Çevrimiçi' : 'Çevrimdışı'}</Text>
                     </View>
                     <Feather
                       name={selectedTvId === tv.id ? 'check-circle' : 'chevron-right'}
@@ -683,12 +825,19 @@ const styles = StyleSheet.create({
   scanButton: { height: 52, borderRadius: 15, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 9, marginBottom: 20 },
   scanButtonText: { color: colors.primary, fontSize: 15, fontWeight: '700' },
   discoverySection: { marginBottom: 20 },
+  discoveryStatus: { color: colors.mutedForeground, fontSize: 11, marginTop: -3, marginBottom: 10 },
   tvOption: { minHeight: 62, borderRadius: 15, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.secondary, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, marginBottom: 8 },
   tvOptionSelected: { borderColor: colors.primary, backgroundColor: colors.accent },
+  tvOptionOffline: { opacity: 0.62 },
   tvOptionIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
   tvOptionInfo: { flex: 1, marginHorizontal: 10 },
   tvOptionName: { color: colors.foreground, fontSize: 14, fontWeight: '700' },
   tvOptionMeta: { color: colors.mutedForeground, fontSize: 11, marginTop: 3 },
+  tvOptionStatus: { alignItems: 'flex-end', marginRight: 8, gap: 4 },
+  tvStatusDot: { width: 7, height: 7, borderRadius: 4 },
+  tvStatusDotOnline: { backgroundColor: colors.primary },
+  tvStatusDotOffline: { backgroundColor: colors.mutedForeground },
+  tvStatusText: { color: colors.mutedForeground, fontSize: 9, fontWeight: '700' },
   manualLabel: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.2, marginBottom: 12 },
   inputLabel: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.4, marginBottom: 8 },
   input: { height: 52, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.input, color: colors.foreground, paddingHorizontal: 16, fontSize: 16, marginBottom: 16 },
