@@ -1,7 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
+import { isAvailable as isSsdpAvailable, searchStream, getNetworkInterfaces, type SsdpDevice } from 'expo-ssdp';
 import { Feather } from '@expo/vector-icons';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -25,6 +26,14 @@ type Connection = {
   accessToken: string;
   session?: string;
   name?: string;
+};
+
+type DiscoveredTv = {
+  id: string;
+  host: string;
+  name: string;
+  model?: string;
+  server?: string;
 };
 
 type RemoteCommand = {
@@ -55,6 +64,8 @@ const COMMANDS = {
   APPS: 417,
 } as const;
 
+const SSDP_TIMEOUT_MS = 8000;
+
 function tvUrl(host: string, path: string) {
   return `http://${host.trim()}:${PORT}/roap/api/${path}`;
 }
@@ -75,6 +86,40 @@ async function postXml(url: string, body: string) {
 function xmlValue(xml: string, tag: string) {
   const match = xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`));
   return match?.[1] ?? '';
+}
+
+function getSsdpHeader(device: SsdpDevice, ...names: string[]) {
+  const headers = device.headers ?? {};
+  for (const name of names) {
+    const matchingKey = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+    if (matchingKey && headers[matchingKey]) return headers[matchingKey];
+  }
+  return '';
+}
+
+function toNetCastTv(device: SsdpDevice): DiscoveredTv | null {
+  const model = getSsdpHeader(device, 'modelname', 'model-name', 'model', 'friendlyname', 'device-name');
+  const server = device.server ?? getSsdpHeader(device, 'server');
+  const responseText = [
+    model,
+    server,
+    device.st,
+    device.usn,
+    device.location,
+    ...Object.values(device.headers ?? {}),
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  if (!/lg|lge|netcast/.test(responseText)) return null;
+
+  return {
+    id: device.usn?.split('::')[0] || `${device.address}:${device.location ?? ''}`,
+    host: device.address,
+    name: model || 'LG NetCast TV',
+    model: model || undefined,
+    server: server || undefined,
+  };
 }
 
 async function requestPairingKey(host: string) {
@@ -277,6 +322,10 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(false);
   const [commandBusy, setCommandBusy] = useState(false);
   const [showPairing, setShowPairing] = useState(false);
+  const [discoveredTvs, setDiscoveredTvs] = useState<DiscoveredTv[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [selectedTvId, setSelectedTvId] = useState('');
+  const scanId = useRef(0);
 
   const connected = Boolean(connection?.session);
   const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host]);
@@ -301,12 +350,94 @@ export default function HomeScreen() {
       .catch(() => setStatus('Bağlantı bilgileri okunamadı.'));
   }, []);
 
+  const scanForTvs = useCallback(async () => {
+    const currentScanId = ++scanId.current;
+    setScanning(true);
+    setDiscoveredTvs([]);
+    setSelectedTvId('');
+    setError('');
+    setStatus('Ağdaki NetCast TV’ler aranıyor…');
+
+    if (Platform.OS === 'web') {
+      setError('Ağ taraması yalnızca fiziksel Android/iOS cihazlarda kullanılabilir. IP adresini elle girebilirsiniz.');
+      setStatus('Elle bağlantı bekleniyor.');
+      setScanning(false);
+      return;
+    }
+
+    if (!isSsdpAvailable) {
+      setError('Ağ taraması bu Expo Go oturumunda kullanılamıyor. SSDP destekli geliştirme derlemesini açın veya IP adresini elle girin.');
+      setStatus('Geliştirme derlemesi gerekli.');
+      setScanning(false);
+      return;
+    }
+
+    try {
+      const interfaces = await getNetworkInterfaces();
+      if (interfaces.length === 0) {
+        throw new Error('NO_WIFI');
+      }
+
+      const foundHosts = new Set<string>();
+      for await (const device of searchStream({
+        searchTargets: ['ssdp:all'],
+        timeoutMs: SSDP_TIMEOUT_MS,
+        mx: 3,
+        repeatProbe: true,
+        multicastEnabled: Platform.OS === 'android',
+        broadcastEnabled: true,
+      })) {
+        if (scanId.current !== currentScanId) return;
+        const tv = toNetCastTv(device);
+        if (!tv) continue;
+        if (foundHosts.has(tv.host)) continue;
+        foundHosts.add(tv.host);
+        setDiscoveredTvs((previous) => {
+          if (previous.some((item) => item.id === tv.id || item.host === tv.host)) return previous;
+          return [...previous, tv];
+        });
+      }
+
+      if (scanId.current !== currentScanId) return;
+      setStatus(
+        foundHosts.size > 0
+          ? `${foundHosts.size} TV bulundu. Eşleştirmek için birini seçin.`
+          : 'Tarama tamamlandı.',
+      );
+      if (foundHosts.size === 0) {
+        setError('NetCast TV bulunamadı. Telefonun ve TV’nin aynı Wi‑Fi ağında olduğundan emin olun.');
+      }
+    } catch (scanError) {
+      if (scanId.current !== currentScanId) return;
+      const message = scanError instanceof Error ? scanError.message : '';
+      if (message === 'NO_WIFI') {
+        setError('Wi‑Fi bağlantısı bulunamadı. Telefonu TV ile aynı yerel ağa bağlayın.');
+        setStatus('Yerel ağ bağlantısı gerekli.');
+      } else {
+        setError('Yerel ağ taraması tamamlanamadı. Android ağ izinlerini ve Wi‑Fi bağlantısını kontrol edin.');
+        setStatus('Tarama zaman aşımına uğradı.');
+      }
+    } finally {
+      if (scanId.current === currentScanId) setScanning(false);
+    }
+  }, []);
+
+  const selectTv = useCallback((tv: DiscoveredTv) => {
+    setHost(tv.host);
+    setTvName(tv.name);
+    setPairingKey('');
+    setShowPairing(false);
+    setSelectedTvId(tv.id);
+    setError('');
+    setStatus(`${tv.name} seçildi. TV ekranında kod istemek için devam edin.`);
+  }, []);
+
   const pair = useCallback(async () => {
     const cleanHost = host.trim();
     const cleanKey = pairingKey.trim();
     setError('');
     if (!cleanHost) {
-      setError('TV’nin yerel IP adresini girin. Örnek: 192.168.1.42');
+      setError('Bir TV seçin veya yerel IP adresini girin. Örnek: 192.168.1.42');
       return;
     }
     if (!cleanKey) {
@@ -393,9 +524,58 @@ export default function HomeScreen() {
             </View>
             <Text style={styles.cardTitle}>TV’ye bağlanın</Text>
             <Text style={styles.cardBody}>
-              Telefon ve LG NetCast TV aynı Wi‑Fi ağında olmalı. TV’nin IP adresini ağ ayarlarında bulabilirsiniz.
+              Telefon ve LG NetCast TV aynı Wi‑Fi ağında olmalı. Önce ağda otomatik arayın veya IP adresini elle girin.
             </Text>
 
+            <Pressable
+              testID="scan-tvs-button"
+              accessibilityRole="button"
+              disabled={scanning}
+              onPress={scanForTvs}
+              style={({ pressed }) => [styles.scanButton, pressed && styles.pressed, scanning && styles.disabled]}
+            >
+              {scanning ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <Feather name="search" size={18} color={colors.primary} />
+              )}
+              <Text style={styles.scanButtonText}>{scanning ? 'Ağ taranıyor…' : 'Ağdaki TV’leri tara'}</Text>
+            </Pressable>
+
+            {discoveredTvs.length > 0 ? (
+              <View style={styles.discoverySection}>
+                <Text style={styles.inputLabel}>BULUNAN TV’LER</Text>
+                {discoveredTvs.map((tv) => (
+                  <Pressable
+                    key={tv.id}
+                    testID={`discovered-tv-${tv.host}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${tv.name}, ${tv.host}`}
+                    onPress={() => selectTv(tv)}
+                    style={({ pressed }) => [
+                      styles.tvOption,
+                      selectedTvId === tv.id && styles.tvOptionSelected,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={styles.tvOptionIcon}>
+                      <Feather name="tv" size={18} color={colors.primary} />
+                    </View>
+                    <View style={styles.tvOptionInfo}>
+                      <Text style={styles.tvOptionName}>{tv.name}</Text>
+                      <Text style={styles.tvOptionMeta}>{tv.host}{tv.model && tv.model !== tv.name ? ` · ${tv.model}` : ''}</Text>
+                    </View>
+                    <Feather
+                      name={selectedTvId === tv.id ? 'check-circle' : 'chevron-right'}
+                      size={19}
+                      color={selectedTvId === tv.id ? colors.primary : colors.mutedForeground}
+                    />
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+
+            <Text style={styles.manualLabel}>VEYA IP ADRESİYLE DEVAM EDİN</Text>
             <Text style={styles.inputLabel}>TV IP ADRESİ</Text>
             <TextInput
               testID="tv-ip-input"
@@ -440,12 +620,12 @@ export default function HomeScreen() {
               style={({ pressed }) => [styles.connectButton, pressed && styles.pressed, loading && styles.disabled]}
             >
               {loading ? <ActivityIndicator color={colors.primaryForeground} /> : <Feather name="link" size={18} color={colors.primaryForeground} />}
-              <Text style={styles.connectButtonText}>{showPairing ? 'TV’yi eşleştir' : 'TV’yi bul ve eşleştir'}</Text>
+              <Text style={styles.connectButtonText}>{showPairing ? 'TV’yi eşleştir' : 'TV’den kod iste'}</Text>
             </Pressable>
 
             <View style={styles.protocolNote}>
               <Feather name="shield" size={15} color={colors.mutedForeground} />
-              <Text style={styles.protocolText}>Yerel ağ bağlantısı · ROAP / NetCast 3–4</Text>
+              <Text style={styles.protocolText}>SSDP M-SEARCH + B-SEARCH · ROAP / NetCast 3–4</Text>
             </View>
           </View>
         ) : (
@@ -500,6 +680,16 @@ const styles = StyleSheet.create({
   setupIcon: { width: 50, height: 50, borderRadius: 17, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', marginBottom: 17 },
   cardTitle: { color: colors.foreground, fontSize: 21, fontWeight: '700', letterSpacing: -0.3 },
   cardBody: { color: colors.mutedForeground, fontSize: 14, lineHeight: 21, marginTop: 8, marginBottom: 25 },
+  scanButton: { height: 52, borderRadius: 15, borderWidth: 1, borderColor: colors.primary, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 9, marginBottom: 20 },
+  scanButtonText: { color: colors.primary, fontSize: 15, fontWeight: '700' },
+  discoverySection: { marginBottom: 20 },
+  tvOption: { minHeight: 62, borderRadius: 15, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.secondary, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, marginBottom: 8 },
+  tvOptionSelected: { borderColor: colors.primary, backgroundColor: colors.accent },
+  tvOptionIcon: { width: 36, height: 36, borderRadius: 12, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
+  tvOptionInfo: { flex: 1, marginHorizontal: 10 },
+  tvOptionName: { color: colors.foreground, fontSize: 14, fontWeight: '700' },
+  tvOptionMeta: { color: colors.mutedForeground, fontSize: 11, marginTop: 3 },
+  manualLabel: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.2, marginBottom: 12 },
   inputLabel: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.4, marginBottom: 8 },
   input: { height: 52, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.input, color: colors.foreground, paddingHorizontal: 16, fontSize: 16, marginBottom: 16 },
   pairingInput: { letterSpacing: 2.4 },

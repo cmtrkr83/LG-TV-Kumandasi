@@ -8,16 +8,33 @@
     "scheme": "netcast-remote",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "NetCast TV’leri aynı Wi‑Fi ağında bulmak ve kumandayı çalıştırmak için yerel ağ erişimi gerekir."
+      }
     },
     "android": {
-      "usesCleartextTraffic": true,
-      "permissions": ["android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE"]
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.CHANGE_WIFI_MULTICAST_STATE"
+      ]
     },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
-    "plugins": ["expo-router"],
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
