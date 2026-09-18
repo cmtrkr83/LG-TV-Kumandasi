@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "SMTFrZXc9yUcjPOqcBEY-"
+uri = "file://artifacts/netcast-remote/expo-qr.png"
+type = "image"
+title = "NetCast Kumanda — Expo QR kodu"
+description = "Expo Go ile taratın. Bağlantı: exp://f0749e61-9656-4dba-bc38-31517cb640ba-00-2a1k1m9ph3dmd.expo.worf.replit.dev"
+logical_id = "96a5f51f-6669-43de-8a08-40d2286dd0e0"
+content_hash = "sha256:3ccbbf1b6964154ae27de3ace1912e3269c38e2142541d92578bdab51d5bad9e"
+size = 1246
+mtime_ms = 1789755037414
+storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:f0749e61-9656-4dba-bc38-31517cb640ba/96a5f51f-6669-43de-8a08-40d2286dd0e0/24322e06-32d9-4db2-ac7f-31a23834b9f2"
+storage_version_token = "1789755037803068"
+content_type = "image/png"
