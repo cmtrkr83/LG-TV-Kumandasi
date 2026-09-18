@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
+import * as Network from 'expo-network';
 import {
   getNetworkInterfaces,
   isAvailable as isSsdpAvailable,
@@ -73,6 +74,14 @@ const COMMANDS = {
 } as const;
 
 const SSDP_TIMEOUT_MS = 8000;
+const DIRECT_SCAN_TIMEOUT_MS = 450;
+const DIRECT_SCAN_BATCH_SIZE = 32;
+const NETCAST_SEARCH_TARGETS = [
+  'ssdp:all',
+  'udap:rootservice',
+  'urn:schemas-udap:service:netrcu:1',
+  'urn:schemas-udap:service:smartText:1',
+];
 
 function tvUrl(host: string, path: string) {
   return `http://${host.trim()}:${PORT}/roap/api/${path}`;
@@ -119,7 +128,10 @@ function toNetCastTv(device: SsdpDevice): DiscoveredTv | null {
     .join(' ')
     .toLowerCase();
 
-  if (!/lg|lge|netcast/.test(responseText)) return null;
+  // NetCast responses frequently identify themselves only as
+  // `udap:rootservice`, `/udap/api/`, or a model code such as `47LN5750`.
+  // Requiring the literal "LG" here silently discarded real LG TVs.
+  if (!/lg|lge|netcast|udap|rootservice|schemas-udap/.test(responseText)) return null;
 
   return {
     id: device.usn?.split('::')[0] || `${device.address}:${device.location ?? ''}`,
@@ -153,12 +165,68 @@ function notifyLooksLikeNetCast(event: SsdpNotifyEvent) {
   ]
     .join(' ')
     .toLowerCase();
-  return /lg|lge|netcast/.test(eventText);
+  return /lg|lge|netcast|udap|rootservice|schemas-udap/.test(eventText);
 }
 
 function tvMatchesNotification(tv: DiscoveredTv, event: SsdpNotifyEvent) {
   const deviceId = notifyDeviceId(event);
   return tv.host === event.address || (Boolean(deviceId) && tv.id === deviceId);
+}
+
+function extractNetCastName(xml: string) {
+  const match = xml.match(/<friendlyName>([^<]+)<\/friendlyName>/i);
+  return match?.[1]?.trim() || 'LG NetCast TV';
+}
+
+async function probeNetCastHost(host: string): Promise<DiscoveredTv | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DIRECT_SCAN_TIMEOUT_MS);
+  try {
+    const response = await fetch(
+      `http://${host}:${PORT}/roap/api/data?target=rootservice.xml`,
+      {
+        headers: { Accept: 'application/xml', 'User-Agent': 'UDAP/2.0' },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) return null;
+    const body = await response.text();
+    if (!body.includes('<') || !/friendlyName|rootservice|udap/i.test(body)) return null;
+    return {
+      id: `netcast:${host}`,
+      host,
+      name: extractNetCastName(body),
+      online: true,
+      model: extractNetCastName(body),
+      server: 'UDAP/NetCast',
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function scanLocalSubnet(onFound: (tv: DiscoveredTv) => void) {
+  const localIp = await Network.getIpAddressAsync();
+  const octets = localIp.split('.');
+  if (octets.length !== 4 || octets.some((octet) => !/^\d+$/.test(octet))) {
+    throw new Error('NO_WIFI');
+  }
+
+  const prefix = octets.slice(0, 3).join('.');
+  const ownHost = Number(octets[3]);
+  const hosts = Array.from({ length: 254 }, (_, index) => `${prefix}.${index + 1}`).filter(
+    (host) => host !== `${prefix}.${ownHost}`,
+  );
+
+  for (let index = 0; index < hosts.length; index += DIRECT_SCAN_BATCH_SIZE) {
+    const batch = hosts.slice(index, index + DIRECT_SCAN_BATCH_SIZE);
+    const results = await Promise.all(batch.map((host) => probeNetCastHost(host)));
+    for (const tv of results) {
+      if (tv) onFound(tv);
+    }
+  }
 }
 
 async function requestPairingKey(host: string) {
@@ -407,37 +475,40 @@ export default function HomeScreen() {
       return;
     }
 
-    if (!isSsdpAvailable) {
-      setError('Ağ taraması bu Expo Go oturumunda kullanılamıyor. SSDP destekli geliştirme derlemesini açın veya IP adresini elle girin.');
-      setStatus('Geliştirme derlemesi gerekli.');
-      setScanning(false);
-      return;
-    }
-
     try {
-      const interfaces = await getNetworkInterfaces();
-      if (interfaces.length === 0) {
-        throw new Error('NO_WIFI');
-      }
-
       const foundHosts = new Set<string>();
-      for await (const device of searchStream({
-        searchTargets: ['ssdp:all'],
-        timeoutMs: SSDP_TIMEOUT_MS,
-        mx: 3,
-        repeatProbe: true,
-        multicastEnabled: Platform.OS === 'android',
-        broadcastEnabled: true,
-      })) {
-        if (scanId.current !== currentScanId) return;
-        const tv = toNetCastTv(device);
-        if (!tv) continue;
-        if (foundHosts.has(tv.host)) continue;
+      const addFoundTv = (tv: DiscoveredTv) => {
+        if (foundHosts.has(tv.host)) return;
         foundHosts.add(tv.host);
         knownTvAddresses.current.add(tv.host);
         knownTvIds.current.add(tv.id);
-        setDiscoveredTvs((previous) => {
-          return upsertDiscoveredTv(previous, tv);
+        setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv));
+      };
+
+      if (isSsdpAvailable) {
+        const interfaces = await getNetworkInterfaces();
+        if (interfaces.length > 0) {
+          for await (const device of searchStream({
+            searchTargets: NETCAST_SEARCH_TARGETS,
+            timeoutMs: SSDP_TIMEOUT_MS,
+            mx: 3,
+            repeatProbe: true,
+            multicastEnabled: Platform.OS === 'android',
+            broadcastEnabled: true,
+          })) {
+            if (scanId.current !== currentScanId) return;
+            const tv = toNetCastTv(device);
+            if (tv) addFoundTv(tv);
+          }
+        }
+      }
+
+      // Some routers drop SSDP and Expo Go does not include custom native
+      // modules. Fall back to probing NetCast's known local HTTP endpoint.
+      if (foundHosts.size === 0) {
+        setStatus('SSDP yanıt vermedi; TV adresleri doğrudan kontrol ediliyor…');
+        await scanLocalSubnet((tv) => {
+          if (scanId.current === currentScanId) addFoundTv(tv);
         });
       }
 
@@ -482,8 +553,8 @@ export default function HomeScreen() {
 
     refreshingNotificationHosts.current.add(event.address);
     try {
-      for await (const device of searchStream({
-        searchTargets: ['ssdp:all'],
+        for await (const device of searchStream({
+          searchTargets: NETCAST_SEARCH_TARGETS,
         timeoutMs: 2200,
         mx: 1,
         repeatProbe: false,
