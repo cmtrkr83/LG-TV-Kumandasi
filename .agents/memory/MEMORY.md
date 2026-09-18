@@ -1,1 +1,2 @@
 - [NetCast protocol coverage](netcast-protocol.md) — ROAP is the network-control path for NetCast 3/4; pre-2012 models may require HDCP.
+- [Expo host DevTools warning](expo-devtools-host.md) — Metro can run when React Native DevTools lacks host-side libglib.

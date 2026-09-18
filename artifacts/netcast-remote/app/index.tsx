@@ -10,6 +10,7 @@ import {
   type SsdpNotifyEvent,
 } from 'expo-ssdp';
 import { Feather } from '@expo/vector-icons';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -436,6 +437,8 @@ export default function HomeScreen() {
   const knownTvAddresses = useRef(new Set<string>());
   const knownTvIds = useRef(new Set<string>());
   const refreshingNotificationHosts = useRef(new Set<string>());
+  const notificationOnlineState = useRef(new Map<string, boolean>());
+  const liveListenerGeneration = useRef(0);
 
   const connected = Boolean(connection?.session);
   const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host]);
@@ -546,8 +549,13 @@ export default function HomeScreen() {
     });
   }, []);
 
-  const refreshTvFromNotification = useCallback(async (event: SsdpNotifyEvent) => {
-    if (Platform.OS === 'web' || !isSsdpAvailable || refreshingNotificationHosts.current.has(event.address)) {
+  const refreshTvFromNotification = useCallback(async (event: SsdpNotifyEvent, generation: number) => {
+    if (
+      Platform.OS === 'web' ||
+      !isSsdpAvailable ||
+      liveListenerGeneration.current !== generation ||
+      refreshingNotificationHosts.current.has(event.address)
+    ) {
       return;
     }
 
@@ -564,6 +572,12 @@ export default function HomeScreen() {
       })) {
         const tv = toNetCastTv(device);
         if (!tv) continue;
+        if (
+          liveListenerGeneration.current !== generation ||
+          notificationOnlineState.current.get(event.address) !== true
+        ) {
+          return;
+        }
         knownTvAddresses.current.add(tv.host);
         knownTvIds.current.add(tv.id);
         setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv));
@@ -575,53 +589,67 @@ export default function HomeScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    if (Platform.OS === 'web' || !isSsdpAvailable) return;
+  useFocusEffect(
+    useCallback(() => {
+      if (Platform.OS === 'web' || !isSsdpAvailable) return;
 
-    let subscription: { remove: () => void } | undefined;
-    try {
-      subscription = listenForNotifications({
-        onAlive: (event) => {
-          const knownDevice =
-            knownTvAddresses.current.has(event.address) ||
-            knownTvIds.current.has(notifyDeviceId(event));
-          if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
+      const generation = ++liveListenerGeneration.current;
+      let active = true;
+      let subscription: { remove: () => void } | undefined;
+      try {
+        subscription = listenForNotifications({
+          onAlive: (event) => {
+            if (!active || liveListenerGeneration.current !== generation) return;
+            const knownDevice =
+              knownTvAddresses.current.has(event.address) ||
+              knownTvIds.current.has(notifyDeviceId(event));
+            if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
 
-          markTvOnline(event, true);
-          setStatus('NetCast TV listesi güncelleniyor…');
-          void refreshTvFromNotification(event);
-        },
-        onUpdate: (event) => {
-          const knownDevice =
-            knownTvAddresses.current.has(event.address) ||
-            knownTvIds.current.has(notifyDeviceId(event));
-          if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
+            notificationOnlineState.current.set(event.address, true);
+            markTvOnline(event, true);
+            setStatus('NetCast TV listesi güncelleniyor…');
+            void refreshTvFromNotification(event, generation);
+          },
+          onUpdate: (event) => {
+            if (!active || liveListenerGeneration.current !== generation) return;
+            const knownDevice =
+              knownTvAddresses.current.has(event.address) ||
+              knownTvIds.current.has(notifyDeviceId(event));
+            if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
 
-          markTvOnline(event, true);
-          void refreshTvFromNotification(event);
-        },
-        onByeBye: (event) => {
-          const knownDevice =
-            knownTvAddresses.current.has(event.address) ||
-            knownTvIds.current.has(notifyDeviceId(event));
-          if (!knownDevice) return;
+            notificationOnlineState.current.set(event.address, true);
+            markTvOnline(event, true);
+            void refreshTvFromNotification(event, generation);
+          },
+          onByeBye: (event) => {
+            if (!active || liveListenerGeneration.current !== generation) return;
+            const knownDevice =
+              knownTvAddresses.current.has(event.address) ||
+              knownTvIds.current.has(notifyDeviceId(event));
+            if (!knownDevice) return;
 
-          markTvOnline(event, false);
-          setStatus('Bir NetCast TV çevrimdışı görünüyor.');
-        },
-        onError: () => {
-          setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
-        },
-      });
-    } catch {
-      setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
-    }
+            notificationOnlineState.current.set(event.address, false);
+            markTvOnline(event, false);
+            setStatus('Bir NetCast TV çevrimdışı görünüyor.');
+          },
+          onError: () => {
+            if (!active || liveListenerGeneration.current !== generation) return;
+            setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
+          },
+        });
+      } catch {
+        setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
+      }
 
-    return () => {
-      subscription?.remove();
-      refreshingNotificationHosts.current.clear();
-    };
-  }, [markTvOnline, refreshTvFromNotification]);
+      return () => {
+        active = false;
+        liveListenerGeneration.current += 1;
+        subscription?.remove();
+        refreshingNotificationHosts.current.clear();
+        notificationOnlineState.current.clear();
+      };
+    }, [markTvOnline, refreshTvFromNotification]),
+  );
 
   const selectTv = useCallback((tv: DiscoveredTv) => {
     if (!tv.online) return;
