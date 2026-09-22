@@ -15,12 +15,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -53,24 +55,54 @@ type RemoteCommand = {
   tone?: 'primary' | 'soft' | 'danger';
 };
 
+// ROAP HandleKeyInput decimal codes (NetCast 3/4, models > 2012).
+// Reference: b-jesch/service.lgtv.remote KEYCODES.LG (ROAP section).
 const COMMANDS = {
   POWER: 1,
+  NUM_0: 2,
+  NUM_1: 3,
+  NUM_2: 4,
+  NUM_3: 5,
+  NUM_4: 6,
+  NUM_5: 7,
+  NUM_6: 8,
+  NUM_7: 9,
+  NUM_8: 10,
+  NUM_9: 11,
   UP: 12,
   DOWN: 13,
   LEFT: 14,
   RIGHT: 15,
   OK: 20,
   HOME: 21,
+  MENU: 22,
   BACK: 23,
   VOLUME_UP: 24,
   VOLUME_DOWN: 25,
   MUTE: 26,
   CHANNEL_UP: 27,
   CHANNEL_DOWN: 28,
+  BLUE: 29,
+  GREEN: 30,
+  RED: 31,
+  YELLOW: 32,
   PLAY: 33,
   PAUSE: 34,
   STOP: 35,
+  REWIND: 36,
+  FAST_FORWARD: 37,
+  LIVE_TV: 43,
+  GUIDE: 44,
+  INFO: 45,
+  RATIO: 46,
   INPUT: 47,
+  SUBTITLE: 49,
+  CHANNEL_LIST: 50,
+  DASH: 402,
+  PREV_CHANNEL: 403,
+  FAVORITE: 404,
+  QUICK_MENU: 405,
+  EXIT: 412,
   APPS: 417,
 } as const;
 
@@ -259,14 +291,48 @@ async function sendCommand(connection: Connection, key: number) {
   );
 }
 
+// Mouse / touchpad control over the same ROAP session as the keys.
+// Payload shape mirrors ConnectSDK's NetcastTVService (UDAP params
+// name/x/y/value mapped into our ROAP <command> envelope):
+//   move  -> <type>HandleTouchMove</type><x>dx</x><y>dy</y>   (relative deltas, ints)
+//   click -> <type>HandleTouchClick</type>
+//   wheel -> <type>HandleTouchWheel</type><value>up|down</value>
+// The TV summons the cursor on first movement; no separate pairing needed.
+async function sendRawCommand(connection: Connection, innerXml: string) {
+  if (!connection.session) {
+    throw new Error('TV bağlantısı hazır değil.');
+  }
+  await postXml(
+    tvUrl(connection.host, 'command'),
+    `${XML_HEADER}<command><session>${connection.session}</session>${innerXml}</command>`,
+  );
+}
+
+async function sendTouchMove(connection: Connection, dx: number, dy: number) {
+  await sendRawCommand(
+    connection,
+    `<type>HandleTouchMove</type><x>${Math.round(dx)}</x><y>${Math.round(dy)}</y>`,
+  );
+}
+
+async function sendTouchClick(connection: Connection) {
+  await sendRawCommand(connection, `<type>HandleTouchClick</type>`);
+}
+
+async function sendTouchWheel(connection: Connection, direction: 'up' | 'down') {
+  await sendRawCommand(connection, `<type>HandleTouchWheel</type><value>${direction}</value>`);
+}
+
 function IconButton({
   command,
   onPress,
   disabled,
+  iconOnly,
 }: {
   command: RemoteCommand;
   onPress: (command: RemoteCommand) => void;
   disabled?: boolean;
+  iconOnly?: boolean;
 }) {
   return (
     <Pressable
@@ -294,33 +360,317 @@ function IconButton({
               : colors.foreground
         }
       />
-      <Text
-        style={[
-          styles.buttonLabel,
-          command.tone === 'primary' && styles.primaryLabel,
-        ]}
-      >
+      {iconOnly ? null : (
+        <Text
+          numberOfLines={2}
+          style={[
+            styles.buttonLabel,
+            command.tone === 'primary' && styles.primaryLabel,
+          ]}
+        >
+          {command.label}
+        </Text>
+      )}
+    </Pressable>
+  );
+}
+
+function SectionCaption({ children }: { children: string }) {
+  return <Text style={styles.sectionCaption}>{children}</Text>;
+}
+
+/**
+ * Ergonomics: volume / channel need press-and-hold repeat — tapping 20 times
+ * to change volume is the #1 pain of soft remotes. Fires immediately on
+ * touch-down, then repeats after a short delay. Uses the repeat path (no
+ * global busy lock) so repeats flow without stutter.
+ */
+const HOLD_INITIAL_DELAY_MS = 450;
+const HOLD_REPEAT_MS = 200;
+
+function PressHoldButton({
+  command,
+  onHold,
+  disabled,
+  flat,
+  seam,
+}: {
+  command: RemoteCommand;
+  onHold: (command: RemoteCommand) => void;
+  disabled?: boolean;
+  /** Bare half inside a joined rocker pill (container provides bg/shape). */
+  flat?: boolean;
+  /** Divider line under this half (used for the top half of a rocker). */
+  seam?: boolean;
+}) {
+  const timers = useRef<{ delay?: ReturnType<typeof setTimeout>; repeat?: ReturnType<typeof setInterval> }>({});
+
+  const stop = useCallback(() => {
+    if (timers.current.delay) clearTimeout(timers.current.delay);
+    if (timers.current.repeat) clearInterval(timers.current.repeat);
+    timers.current = {};
+  }, []);
+
+  useEffect(() => stop, [stop]);
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${command.label} (basılı tutunca tekrarlar)`}
+      testID={`remote-${command.label}`}
+      disabled={disabled}
+      onPressIn={() => {
+        if (disabled) return;
+        void Haptics.selectionAsync();
+        onHold(command);
+        timers.current.delay = setTimeout(() => {
+          timers.current.repeat = setInterval(() => onHold(command), HOLD_REPEAT_MS);
+        }, HOLD_INITIAL_DELAY_MS);
+      }}
+      onPressOut={stop}
+      onBlur={stop}
+      style={({ pressed }) => [
+        styles.iconButton,
+        flat && styles.rockerHalf,
+        seam && styles.rockerSeam,
+        pressed && styles.pressed,
+        disabled && styles.disabled,
+      ]}
+    >
+      <Feather name={command.icon} size={22} color={colors.foreground} />
+      <Text numberOfLines={2} style={styles.buttonLabel}>
         {command.label}
       </Text>
     </Pressable>
   );
 }
 
-function RemotePad({
+function NumberKey({
+  digit,
+  onPress,
+  disabled,
+}: {
+  digit: string;
+  onPress: (digit: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Rakam ${digit}`}
+      testID={`remote-sayi-${digit}`}
+      disabled={disabled}
+      onPress={() => onPress(digit)}
+      style={({ pressed }) => [
+        styles.numberKey,
+        pressed && styles.pressed,
+        disabled && styles.disabled,
+      ]}
+    >
+      <Text style={styles.numberKeyText}>{digit}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Touchpad page (left page). Drag moves the TV cursor (relative deltas,
+ * scaled by MOUSE_SENSITIVITY); a quick tap without drag sends a click.
+ * Calls onActiveChange so the outer horizontal pager can lock while the
+ * finger is down — otherwise the pager would steal horizontal drags.
+ */
+const MOUSE_SENSITIVITY = 2;
+const MOUSE_MAX_STEP = 60;
+const TAP_MAX_DIST = 12;
+const TAP_MAX_MS = 300;
+
+function TouchPad({
+  onMove,
+  onTap,
+  onActiveChange,
+  disabled,
+}: {
+  onMove: (dx: number, dy: number) => void;
+  onTap: () => void;
+  onActiveChange: (active: boolean) => void;
+  disabled?: boolean;
+}) {
+  const [touching, setTouching] = useState(false);
+  const gesture = useRef({ lastX: 0, lastY: 0, startT: 0 });
+
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => !disabled,
+      onMoveShouldSetPanResponder: () => !disabled,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => {
+        gesture.current = { lastX: 0, lastY: 0, startT: Date.now() };
+        setTouching(true);
+        onActiveChange(true);
+      },
+      onPanResponderMove: (_, gestureState) => {
+        const rawDx = (gestureState.dx - gesture.current.lastX) * MOUSE_SENSITIVITY;
+        const rawDy = (gestureState.dy - gesture.current.lastY) * MOUSE_SENSITIVITY;
+        gesture.current.lastX = gestureState.dx;
+        gesture.current.lastY = gestureState.dy;
+        const dx = Math.max(-MOUSE_MAX_STEP, Math.min(MOUSE_MAX_STEP, rawDx));
+        const dy = Math.max(-MOUSE_MAX_STEP, Math.min(MOUSE_MAX_STEP, rawDy));
+        if (dx !== 0 || dy !== 0) onMove(dx, dy);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const dist = Math.hypot(gestureState.dx, gestureState.dy);
+        const dt = Date.now() - gesture.current.startT;
+        setTouching(false);
+        onActiveChange(false);
+        if (dist <= TAP_MAX_DIST && dt <= TAP_MAX_MS && !disabled) onTap();
+      },
+      onPanResponderTerminate: () => {
+        setTouching(false);
+        onActiveChange(false);
+      },
+    }),
+  ).current;
+
+  return (
+    <View
+      accessibilityRole="button"
+      accessibilityLabel="Fare paneli. Sürükleyince imleç hareket eder, dokununca tıklanır."
+      testID="fare-paneli"
+      {...pan.panHandlers}
+      style={[styles.touchpad, touching && styles.touchpadActive]}
+    >
+      <Feather
+        name="move"
+        size={44}
+        color={touching ? colors.primary : colors.mutedForeground}
+      />
+      <Text style={styles.touchpadHint}>
+        {touching ? 'Hareket ediyor…' : 'Sürükle: imleci hareket ettir · Dokun: tıkla'}
+      </Text>
+    </View>
+  );
+}
+
+function ColorKey({
+  label,
+  dotColor,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  dotColor: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      testID={`remote-${label}`}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => [styles.colorKey, pressed && styles.pressed, disabled && styles.disabled]}
+    >
+      <View style={[styles.colorDot, { backgroundColor: dotColor }]} />
+      <Text numberOfLines={1} style={styles.colorLabel}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Ergonomic layout (portrait phone, thumb-first):
+ *  1. System row — power + most-used TV functions
+ *  2+4. Side rockers (SES left, KANAL right, joined pills) flanking a
+ *      round D-pad with OK — physical-remote form, all rockers repeat
+ *  3. Nav row — Back / Home / Menu / Exit (highest-frequency after OK)
+ *  5. Quick access — Guide / List / Info / Previous channel
+ *  6. Numbers (collapsible) — direct channel entry
+ *  7. Media — compact icon-only transport row
+ *  8. Color keys — data-broadcast red/green/yellow/blue
+ *  9. More (collapsible) — rarely used extras
+ */
+const NUM_PAD: { digit: string; key: number }[] = [
+  { digit: '1', key: COMMANDS.NUM_1 },
+  { digit: '2', key: COMMANDS.NUM_2 },
+  { digit: '3', key: COMMANDS.NUM_3 },
+  { digit: '4', key: COMMANDS.NUM_4 },
+  { digit: '5', key: COMMANDS.NUM_5 },
+  { digit: '6', key: COMMANDS.NUM_6 },
+  { digit: '7', key: COMMANDS.NUM_7 },
+  { digit: '8', key: COMMANDS.NUM_8 },
+  { digit: '9', key: COMMANDS.NUM_9 },
+];
+
+function numberCommand(digit: string): RemoteCommand | null {
+  const entry = NUM_PAD.find((item) => item.digit === digit);
+  if (entry) return { key: entry.key, label: `Rakam ${digit}`, icon: 'hash' };
+  if (digit === '0') return { key: COMMANDS.NUM_0, label: 'Rakam 0', icon: 'hash' };
+  return null;
+}
+
+/** Right page (swipe left): direct channel entry + channel tasks. */
+function NumberPadPage({
   onCommand,
   busy,
 }: {
   onCommand: (command: RemoteCommand) => void;
   busy: boolean;
 }) {
-  const press = (key: number, label: string, icon: keyof typeof Feather.glyphMap, tone?: RemoteCommand['tone']) =>
-    onCommand({ key, label, icon, tone });
+  const pressDigit = (digit: string) => {
+    const command = numberCommand(digit);
+    if (command) onCommand(command);
+  };
 
   return (
     <View style={styles.remotePanel}>
-      <View style={styles.topRemoteRow}>
+      <SectionCaption>RAKAMLAR</SectionCaption>
+      <View style={styles.numberGrid}>
+        {NUM_PAD.map((item) => (
+          <NumberKey key={item.digit} digit={item.digit} onPress={pressDigit} disabled={busy} />
+        ))}
+        <IconButton command={{ key: COMMANDS.DASH, label: 'Tire', icon: 'minus' }} onPress={onCommand} disabled={busy} />
+        <NumberKey digit="0" onPress={pressDigit} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.FAVORITE, label: 'Favori', icon: 'star' }} onPress={onCommand} disabled={busy} />
+      </View>
+      <SectionCaption>KANAL</SectionCaption>
+      <View style={styles.tripleRow}>
+        <IconButton command={{ key: COMMANDS.PREV_CHANNEL, label: 'Önceki Kanal', icon: 'rotate-ccw' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.CHANNEL_LIST, label: 'Kanal Listesi', icon: 'list' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.GUIDE, label: 'Rehber', icon: 'calendar' }} onPress={onCommand} disabled={busy} />
+      </View>
+    </View>
+  );
+}
+
+function RemotePad({
+  onCommand,
+  onRepeatKey,
+  busy,
+  padSize,
+}: {
+  onCommand: (command: RemoteCommand) => void;
+  onRepeatKey: (command: RemoteCommand) => void;
+  busy: boolean;
+  /** D-pad circle diameter, computed from measured pager height. */
+  padSize: number;
+}) {
+  const press = (key: number, label: string, icon: keyof typeof Feather.glyphMap, tone?: RemoteCommand['tone']) =>
+    onCommand({ key, label, icon, tone });
+  const arrowLen = Math.round(padSize * 0.29);
+  const okD = Math.round(padSize * 0.4);
+
+  return (
+    <View style={[styles.remotePanel, styles.fillPanel]}>
+      {/* 1 — System */}
+      <View style={styles.quadRow}>
         <IconButton
           command={{ key: COMMANDS.POWER, label: 'Güç', icon: 'power', tone: 'danger' }}
+          onPress={onCommand}
+          disabled={busy}
+        />
+        <IconButton
+          command={{ key: COMMANDS.QUICK_MENU, label: 'Hızlı Menü', icon: 'sliders', tone: 'soft' }}
           onPress={onCommand}
           disabled={busy}
         />
@@ -330,91 +680,155 @@ function RemotePad({
           disabled={busy}
         />
         <IconButton
-          command={{ key: COMMANDS.APPS, label: 'Uygulamalar', icon: 'grid', tone: 'soft' }}
+          command={{ key: COMMANDS.APPS, label: 'Apps', icon: 'grid', tone: 'soft' }}
           onPress={onCommand}
           disabled={busy}
         />
       </View>
 
-      <View style={styles.directionPad}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Yukarı"
-          testID="remote-yukari"
-          disabled={busy}
-          onPress={() => press(COMMANDS.UP, 'Yukarı', 'chevron-up')}
-          style={({ pressed }) => [styles.directionButton, styles.upButton, pressed && styles.pressed]}
-        >
-          <Feather name="chevron-up" size={26} color={colors.foreground} />
-        </Pressable>
-        <View style={styles.middleDirectionRow}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Sol"
-            testID="remote-sol"
-            disabled={busy}
-            onPress={() => press(COMMANDS.LEFT, 'Sol', 'chevron-left')}
-            style={({ pressed }) => [styles.directionButton, pressed && styles.pressed]}
-          >
-            <Feather name="chevron-left" size={26} color={colors.foreground} />
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Tamam"
-            testID="remote-tamam"
-            disabled={busy}
-            onPress={() => press(COMMANDS.OK, 'Tamam', 'circle', 'primary')}
-            style={({ pressed }) => [styles.okButton, pressed && styles.pressed]}
-          >
-            <Text style={styles.okText}>OK</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Sağ"
-            testID="remote-sag"
-            disabled={busy}
-            onPress={() => press(COMMANDS.RIGHT, 'Sağ', 'chevron-right')}
-            style={({ pressed }) => [styles.directionButton, pressed && styles.pressed]}
-          >
-            <Feather name="chevron-right" size={26} color={colors.foreground} />
-          </Pressable>
+      {/* 2+4 — Side rockers + round D-pad (physical-remote form).
+          Left: joined SES pill (+ top, − bottom). Right: joined KANAL
+          pill. Center: circular D-pad with OK. All rocker halves repeat
+          while held. */}
+      <View style={styles.clusterRow}>
+        <View style={styles.navSide}>
+          <Text style={styles.sideCaption}>SES</Text>
+          <View style={styles.rockerPill}>
+            <PressHoldButton
+              command={{ key: COMMANDS.VOLUME_UP, label: 'Ses artır', icon: 'plus' }}
+              onHold={onRepeatKey}
+              disabled={busy}
+              flat
+              seam
+            />
+            <PressHoldButton
+              command={{ key: COMMANDS.VOLUME_DOWN, label: 'Ses azalt', icon: 'minus' }}
+              onHold={onRepeatKey}
+              disabled={busy}
+              flat
+            />
+          </View>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Aşağı"
-          testID="remote-asagi"
-          disabled={busy}
-          onPress={() => press(COMMANDS.DOWN, 'Aşağı', 'chevron-down')}
-          style={({ pressed }) => [styles.directionButton, styles.downButton, pressed && styles.pressed]}
-        >
-          <Feather name="chevron-down" size={26} color={colors.foreground} />
-        </Pressable>
+        <View style={styles.padWrap}>
+          <View style={[styles.padCircle, { width: padSize, height: padSize }]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Yukarı"
+              testID="remote-yukari"
+              disabled={busy}
+              onPress={() => press(COMMANDS.UP, 'Yukarı', 'chevron-up')}
+              style={({ pressed }) => [styles.padArrowUp, { height: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
+            >
+              <Feather name="chevron-up" size={30} color={colors.foreground} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Sol"
+              testID="remote-sol"
+              disabled={busy}
+              onPress={() => press(COMMANDS.LEFT, 'Sol', 'chevron-left')}
+              style={({ pressed }) => [styles.padArrowLeft, { width: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
+            >
+              <Feather name="chevron-left" size={30} color={colors.foreground} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Tamam"
+              testID="remote-tamam"
+              disabled={busy}
+              onPress={() => press(COMMANDS.OK, 'Tamam', 'circle', 'primary')}
+              style={({ pressed }) => [styles.okButton, { width: okD, height: okD, borderRadius: okD / 2 }, pressed && styles.pressed]}
+            >
+              <Text style={styles.okText}>OK</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Sağ"
+              testID="remote-sag"
+              disabled={busy}
+              onPress={() => press(COMMANDS.RIGHT, 'Sağ', 'chevron-right')}
+              style={({ pressed }) => [styles.padArrowRight, { width: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
+            >
+              <Feather name="chevron-right" size={30} color={colors.foreground} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Aşağı"
+              testID="remote-asagi"
+              disabled={busy}
+              onPress={() => press(COMMANDS.DOWN, 'Aşağı', 'chevron-down')}
+              style={({ pressed }) => [styles.padArrowDown, { height: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
+            >
+              <Feather name="chevron-down" size={30} color={colors.foreground} />
+            </Pressable>
+          </View>
+        </View>
+        <View style={styles.navSide}>
+          <Text style={styles.sideCaption}>KANAL</Text>
+          <View style={styles.rockerPill}>
+            <PressHoldButton
+              command={{ key: COMMANDS.CHANNEL_UP, label: 'Kanal artır', icon: 'chevron-up' }}
+              onHold={onRepeatKey}
+              disabled={busy}
+              flat
+              seam
+            />
+            <PressHoldButton
+              command={{ key: COMMANDS.CHANNEL_DOWN, label: 'Kanal azalt', icon: 'chevron-down' }}
+              onHold={onRepeatKey}
+              disabled={busy}
+              flat
+            />
+          </View>
+        </View>
       </View>
 
-      <View style={styles.utilityRow}>
+      {/* 3 — Navigation */}
+      <View style={styles.quadRow}>
         <IconButton command={{ key: COMMANDS.BACK, label: 'Geri', icon: 'corner-up-left' }} onPress={onCommand} disabled={busy} />
         <IconButton command={{ key: COMMANDS.HOME, label: 'Ana Menü', icon: 'home' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.MUTE, label: 'Sessiz', icon: 'volume-x' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.MENU, label: 'Menü', icon: 'menu' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.EXIT, label: 'Çıkış', icon: 'x' }} onPress={onCommand} disabled={busy} />
       </View>
 
-      <View style={styles.volumeChannelGrid}>
-        <View style={styles.stackControl}>
-          <Text style={styles.controlCaption}>SES</Text>
-          <IconButton command={{ key: COMMANDS.VOLUME_UP, label: 'Ses artır', icon: 'plus' }} onPress={onCommand} disabled={busy} />
-          <IconButton command={{ key: COMMANDS.VOLUME_DOWN, label: 'Ses azalt', icon: 'minus' }} onPress={onCommand} disabled={busy} />
-        </View>
-        <View style={styles.stackControl}>
-          <Text style={styles.controlCaption}>KANAL</Text>
-          <IconButton command={{ key: COMMANDS.CHANNEL_UP, label: 'Kanal artır', icon: 'chevron-up' }} onPress={onCommand} disabled={busy} />
-          <IconButton command={{ key: COMMANDS.CHANNEL_DOWN, label: 'Kanal azalt', icon: 'chevron-down' }} onPress={onCommand} disabled={busy} />
-        </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Sessiz"
+        testID="remote-Sessiz"
+        disabled={busy}
+        onPress={() => press(COMMANDS.MUTE, 'Sessiz', 'volume-x')}
+        style={({ pressed }) => [styles.muteBar, pressed && styles.pressed, busy && styles.disabled]}
+      >
+        <Feather name="volume-x" size={18} color={colors.foreground} />
+        <Text style={styles.muteBarText}>Sessiz</Text>
+      </Pressable>
+
+      {/* 5 — Quick access */}
+      <View style={styles.quadRow}>
+        <IconButton command={{ key: COMMANDS.GUIDE, label: 'Rehber', icon: 'calendar' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.CHANNEL_LIST, label: 'Kanal Listesi', icon: 'list' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.INFO, label: 'Bilgi', icon: 'info' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.PREV_CHANNEL, label: 'Önceki Kanal', icon: 'rotate-ccw' }} onPress={onCommand} disabled={busy} />
       </View>
 
+      {/* 7 — Media transport */}
+      <SectionCaption>MEDYA</SectionCaption>
       <View style={styles.mediaRow}>
-        <IconButton command={{ key: COMMANDS.PLAY, label: 'Oynat', icon: 'play' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.PAUSE, label: 'Duraklat', icon: 'pause' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.STOP, label: 'Durdur', icon: 'square' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={{ key: COMMANDS.REWIND, label: 'Geri sar', icon: 'rewind' }} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={{ key: COMMANDS.PLAY, label: 'Oynat', icon: 'play' }} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={{ key: COMMANDS.PAUSE, label: 'Duraklat', icon: 'pause' }} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={{ key: COMMANDS.STOP, label: 'Durdur', icon: 'square' }} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={{ key: COMMANDS.FAST_FORWARD, label: 'İleri sar', icon: 'fast-forward' }} onPress={onCommand} disabled={busy} iconOnly />
       </View>
+
+      {/* 8 — Color keys */}
+      <View style={styles.colorRow}>
+        <ColorKey label="Kırmızı" dotColor="#E5484D" onPress={() => press(COMMANDS.RED, 'Kırmızı', 'circle')} disabled={busy} />
+        <ColorKey label="Yeşil" dotColor="#30A46C" onPress={() => press(COMMANDS.GREEN, 'Yeşil', 'circle')} disabled={busy} />
+        <ColorKey label="Sarı" dotColor="#F5B638" onPress={() => press(COMMANDS.YELLOW, 'Sarı', 'circle')} disabled={busy} />
+        <ColorKey label="Mavi" dotColor="#3E82F7" onPress={() => press(COMMANDS.BLUE, 'Mavi', 'circle')} disabled={busy} />
+      </View>
+
     </View>
   );
 }
@@ -699,15 +1113,125 @@ export default function HomeScreen() {
     }
   }, [host, pairingKey, tvName]);
 
+  /**
+   * Core key sender — no global busy lock so press-and-hold repeats
+   * (volume / channel) flow without stutter. Single taps wrap this with
+   * the busy indicator via handleCommand.
+   */
+  const fireKey = useCallback(
+    async (command: RemoteCommand, quiet: boolean) => {
+      if (!connection?.session) return;
+      setError('');
+      try {
+        await sendCommand(connection, command.key);
+        if (!quiet) setStatus(`${command.label} gönderildi`);
+      } catch {
+        setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
+        setConnection(null);
+        setStatus('Yeniden bağlanmanız gerekiyor.');
+      }
+    },
+    [connection],
+  );
+
   const handleCommand = useCallback(
     async (command: RemoteCommand) => {
       if (!connection) return;
       setCommandBusy(true);
-      setError('');
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       try {
-        await sendCommand(connection, command.key);
-        setStatus(`${command.label} gönderildi`);
+        await fireKey(command, false);
+      } finally {
+        setCommandBusy(false);
+      }
+    },
+    [connection, fireKey],
+  );
+
+  const handleRepeatKey = useCallback(
+    (command: RemoteCommand) => {
+      void fireKey(command, true);
+    },
+    [fireKey],
+  );
+
+  // --- Mouse / touchpad -------------------------------------------------
+  // High-frequency relative moves are coalesced (like ConnectSDK's
+  // moveMouse): accumulate deltas, flush at most every 80ms. A single
+  // failed packet must not kill the session, but 3 consecutive failures
+  // mean the session is dead -> surface it like key errors do.
+  const mouseAccum = useRef({ x: 0, y: 0 });
+  const mouseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mouseFails = useRef(0);
+
+  const flushMouseMove = useCallback(async () => {
+    mouseTimer.current = null;
+    const dx = Math.round(mouseAccum.current.x);
+    const dy = Math.round(mouseAccum.current.y);
+    mouseAccum.current = { x: 0, y: 0 };
+    if ((dx === 0 && dy === 0) || !connection?.session) return;
+    try {
+      await sendTouchMove(connection, dx, dy);
+      mouseFails.current = 0;
+    } catch {
+      mouseFails.current += 1;
+      if (mouseFails.current >= 3) {
+        mouseFails.current = 0;
+        setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
+        setConnection(null);
+        setStatus('Yeniden bağlanmanız gerekiyor.');
+      } else {
+        setStatus('Fare hareketi gönderiliyor…');
+      }
+    }
+  }, [connection]);
+
+  useEffect(
+    () => () => {
+      if (mouseTimer.current) clearTimeout(mouseTimer.current);
+    },
+    [],
+  );
+
+  const pushMouseMove = useCallback(
+    (dx: number, dy: number) => {
+      mouseAccum.current.x += dx;
+      mouseAccum.current.y += dy;
+      if (!mouseTimer.current) {
+        mouseTimer.current = setTimeout(() => void flushMouseMove(), 80);
+      }
+    },
+    [flushMouseMove],
+  );
+
+  const handleTouchTap = useCallback(async () => {
+    if (!connection) return;
+    setCommandBusy(true);
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      if (!connection.session) return;
+      setError('');
+      await sendTouchClick(connection);
+      setStatus('Tık gönderildi');
+    } catch {
+      setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
+      setConnection(null);
+      setStatus('Yeniden bağlanmanız gerekiyor.');
+    } finally {
+      setCommandBusy(false);
+    }
+  }, [connection]);
+
+  const handleTouchAction = useCallback(
+    async (direction: 'up' | 'down') => {
+      if (!connection) return;
+      setCommandBusy(true);
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      try {
+        if (!connection.session) return;
+        setError('');
+        await sendTouchWheel(connection, direction);
+        setStatus(direction === 'up' ? 'Yukarı kaydırıldı' : 'Aşağı kaydırıldı');
       } catch {
         setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
         setConnection(null);
@@ -718,6 +1242,36 @@ export default function HomeScreen() {
     },
     [connection],
   );
+
+  // --- 3-page pager: [Fare | Kumanda | Sayılar] --------------------------
+  const pageWidth = useWindowDimensions().width;
+  const pagerRef = useRef<ScrollView>(null);
+  const [page, setPage] = useState(1);
+  const [pagerLocked, setPagerLocked] = useState(false);
+  const [pagerHeight, setPagerHeight] = useState(0);
+
+  // Dynamic single-page fit: the D-pad circle grows/shrinks so the whole
+  // main page fits the measured pager height with zero scrolling. The
+  // width budget keeps 12px breathing room per side so the circle never
+  // visually touches the rockers. Leftover vertical slack is distributed
+  // between the rows (space-evenly panel).
+  const MAIN_FIXED_BUDGET = 365;
+  const widthBudget = pageWidth - 40 - 62 * 2 - 16 - 24;
+  const heightBudget = pagerHeight > 0 ? pagerHeight - MAIN_FIXED_BUDGET : 200;
+  const padSize = Math.max(140, Math.min(196, Math.floor(Math.min(widthBudget, heightBudget))));
+
+  const scrollToPage = useCallback(
+    (index: number) => {
+      pagerRef.current?.scrollTo({ x: index * pageWidth, animated: true });
+    },
+    [pageWidth],
+  );
+
+  const pages = [
+    { index: 0, title: 'Fare' },
+    { index: 1, title: 'Kumanda' },
+    { index: 2, title: 'Sayılar' },
+  ];
 
   const disconnect = async () => {
     await AsyncStorage.removeItem(STORAGE_KEY);
@@ -731,23 +1285,23 @@ export default function HomeScreen() {
       style={styles.screen}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 18, paddingBottom: insets.bottom + 24 }]}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.header}>
-          <View style={styles.brandMark}>
-            <Feather name="radio" size={19} color={colors.primary} />
+      {!connected ? (
+        <ScrollView
+          contentContainerStyle={[styles.content, { paddingTop: insets.top + 6, paddingBottom: insets.bottom + 8 }]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.header}>
+            <View style={styles.brandMark}>
+              <Feather name="radio" size={19} color={colors.primary} />
+            </View>
+            <View style={styles.headerText}>
+              <Text style={styles.eyebrow}>NETCAST REMOTE</Text>
+              <Text style={styles.title}>TV kumandanız.</Text>
+            </View>
+            <View style={[styles.connectionDot, connected && styles.connectionDotOn]} />
           </View>
-          <View style={styles.headerText}>
-            <Text style={styles.eyebrow}>NETCAST REMOTE</Text>
-            <Text style={styles.title}>TV kumandanız.</Text>
-          </View>
-          <View style={[styles.connectionDot, connected && styles.connectionDotOn]} />
-        </View>
 
-        {!connected ? (
           <View style={styles.setupCard}>
             <View style={styles.setupIcon}>
               <Feather name="wifi" size={24} color={colors.primary} />
@@ -869,9 +1423,10 @@ export default function HomeScreen() {
               <Text style={styles.protocolText}>SSDP M-SEARCH + B-SEARCH · ROAP / NetCast 3–4</Text>
             </View>
           </View>
-        ) : (
-          <>
-            <View style={styles.connectedCard}>
+        </ScrollView>
+      ) : (
+        <View style={[styles.connectedRoot, { paddingTop: insets.top + 6, paddingBottom: insets.bottom + 8 }]}>
+          <View style={styles.connectedCard}>
               <View style={styles.tvAvatar}>
                 <Feather name="tv" size={20} color={colors.primary} />
               </View>
@@ -889,11 +1444,89 @@ export default function HomeScreen() {
                 <Text style={styles.errorText}>{error}</Text>
               </View>
             ) : null}
-            <RemotePad onCommand={handleCommand} busy={commandBusy} />
-            <Text style={styles.statusText}>{status}</Text>
-          </>
-        )}
-      </ScrollView>
+            <View
+              style={styles.pagerViewport}
+              onLayout={(event) => setPagerHeight(event.nativeEvent.layout.height)}
+            >
+              <ScrollView
+                ref={pagerRef}
+                horizontal
+                pagingEnabled
+                scrollEnabled={!pagerLocked}
+                showsHorizontalScrollIndicator={false}
+                style={styles.pagerScroll}
+                contentOffset={{ x: pageWidth, y: 0 }}
+                onMomentumScrollEnd={(event) => {
+                  setPage(Math.round(event.nativeEvent.contentOffset.x / pageWidth));
+                }}
+              >
+                {/* Left page — swipe right from main */}
+                <View style={[styles.pagerPage, { width: pageWidth }]}>
+                  <View style={[styles.remotePanel, styles.fillPanel]}>
+                    <SectionCaption>FARE</SectionCaption>
+                    <TouchPad
+                      onMove={pushMouseMove}
+                      onTap={handleTouchTap}
+                      onActiveChange={setPagerLocked}
+                      disabled={commandBusy}
+                    />
+                    <Text style={styles.touchpadNote}>
+                      İmleç görünmüyorsa parmağınızı panelde sürükleyin.
+                    </Text>
+                    <View style={styles.tripleRow}>
+                      <IconButton
+                        command={{ key: -1, label: 'Tıkla', icon: 'mouse-pointer' }}
+                        onPress={handleTouchTap}
+                        disabled={commandBusy}
+                      />
+                      <IconButton
+                        command={{ key: -1, label: 'Kaydır ↑', icon: 'chevrons-up' }}
+                        onPress={() => void handleTouchAction('up')}
+                        disabled={commandBusy}
+                      />
+                      <IconButton
+                        command={{ key: -1, label: 'Kaydır ↓', icon: 'chevrons-down' }}
+                        onPress={() => void handleTouchAction('down')}
+                        disabled={commandBusy}
+                      />
+                    </View>
+                  </View>
+                </View>
+                {/* Center page — main remote (no inner scroll: fits viewport) */}
+                <View style={[styles.pagerPage, { width: pageWidth }]}>
+                  <RemotePad
+                    onCommand={handleCommand}
+                    onRepeatKey={handleRepeatKey}
+                    busy={commandBusy}
+                    padSize={padSize}
+                  />
+                </View>
+                {/* Right page — swipe left from main */}
+                <View style={[styles.pagerPage, { width: pageWidth }]}>
+                  <View style={styles.pageCenter}>
+                    <NumberPadPage onCommand={handleCommand} busy={commandBusy} />
+                  </View>
+                </View>
+              </ScrollView>
+            </View>
+            <View style={styles.dotRow} testID="sayfa-gostergesi">
+              {pages.map((item) => (
+                <Pressable
+                  key={item.index}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${item.title} sayfasına git`}
+                  onPress={() => scrollToPage(item.index)}
+                  style={styles.dotItem}
+                >
+                  <View style={[styles.dot, page === item.index && styles.dotActive]} />
+                  <Text style={[styles.dotLabel, page === item.index && styles.dotLabelActive]}>
+                    {item.title}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -945,34 +1578,63 @@ const styles = StyleSheet.create({
   connectButtonText: { color: colors.primaryForeground, fontSize: 15, fontWeight: '700' },
   protocolNote: { alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7, marginTop: 17 },
   protocolText: { color: colors.mutedForeground, fontSize: 11 },
-  errorRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 15 },
+  errorRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 10 },
   errorText: { flex: 1, color: colors.destructive, fontSize: 13, lineHeight: 19 },
-  connectedCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderRadius: 20, borderWidth: 1, borderColor: colors.border, padding: 14, marginBottom: 18 },
+  connectedCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 10, marginBottom: 10 },
   tvAvatar: { width: 42, height: 42, borderRadius: 14, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   connectedInfo: { flex: 1, marginLeft: 11 },
   connectedName: { color: colors.foreground, fontSize: 15, fontWeight: '700' },
   connectedMeta: { color: colors.mutedForeground, fontSize: 11, marginTop: 4 },
   disconnectButton: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
-  remotePanel: { backgroundColor: colors.card, borderRadius: 28, borderWidth: 1, borderColor: colors.border, padding: 16 },
-  topRemoteRow: { flexDirection: 'row', gap: 9, marginBottom: 18 },
-  iconButton: { flex: 1, minHeight: 48, borderRadius: 14, backgroundColor: colors.secondary, alignItems: 'center', justifyContent: 'center', gap: 4, borderWidth: 1, borderColor: colors.border },
+  remotePanel: { backgroundColor: colors.card, borderRadius: 22, borderWidth: 1, borderColor: colors.border, padding: 12 },
+  quadRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  tripleRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },
+  iconButton: { flex: 1, minHeight: 48, borderRadius: 14, backgroundColor: colors.secondary, alignItems: 'center', justifyContent: 'center', gap: 4, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 4 },
   primaryButton: { backgroundColor: colors.primary, borderColor: colors.primary },
   dangerButton: { backgroundColor: '#49252C', borderColor: '#71343C' },
-  buttonLabel: { color: colors.foreground, fontSize: 10, fontWeight: '600' },
+  buttonLabel: { color: colors.foreground, fontSize: 10, fontWeight: '600', textAlign: 'center' },
   primaryLabel: { color: colors.primaryForeground },
+  sectionCaption: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.4, marginBottom: 8, marginLeft: 4 },
   pressed: { opacity: 0.66, transform: [{ scale: 0.97 }] },
   disabled: { opacity: 0.55 },
-  directionPad: { alignItems: 'center', marginBottom: 18 },
-  directionButton: { width: 64, height: 48, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.secondary, borderWidth: 1, borderColor: colors.border },
-  upButton: { marginBottom: 8 },
-  downButton: { marginTop: 8 },
-  middleDirectionRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  clusterRow: { flexDirection: 'row', gap: 8, alignItems: 'stretch', marginBottom: 4 },
+  navSide: { width: 62 },
+  sideCaption: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.2, textAlign: 'center', marginBottom: 6 },
+  rockerPill: { flex: 1, borderRadius: 18, backgroundColor: colors.muted, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+  rockerHalf: { flex: 1, minHeight: 0, backgroundColor: 'transparent', borderWidth: 0, borderRadius: 0 },
+  rockerSeam: { borderBottomWidth: 1, borderBottomColor: colors.border },
+  padWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  padCircle: { width: '100%', maxWidth: 204, aspectRatio: 1, borderRadius: 999, backgroundColor: colors.secondary, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  padArrowUp: { position: 'absolute', top: 2, left: 0, right: 0, height: 58, alignItems: 'center', justifyContent: 'center' },
+  padArrowDown: { position: 'absolute', bottom: 2, left: 0, right: 0, height: 58, alignItems: 'center', justifyContent: 'center' },
+  padArrowLeft: { position: 'absolute', left: 2, top: 0, bottom: 0, width: 58, alignItems: 'center', justifyContent: 'center' },
+  padArrowRight: { position: 'absolute', right: 2, top: 0, bottom: 0, width: 58, alignItems: 'center', justifyContent: 'center' },
   okButton: { width: 78, height: 78, borderRadius: 39, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary, borderWidth: 5, borderColor: colors.accent },
   okText: { color: colors.primaryForeground, fontSize: 15, fontWeight: '800', letterSpacing: 0.4 },
-  utilityRow: { flexDirection: 'row', gap: 9, marginBottom: 16 },
-  volumeChannelGrid: { flexDirection: 'row', gap: 10, marginBottom: 10 },
-  stackControl: { flex: 1, gap: 8 },
-  controlCaption: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.4, marginLeft: 4 },
-  mediaRow: { flexDirection: 'row', gap: 9, marginTop: 6 },
-  statusText: { color: colors.mutedForeground, fontSize: 12, textAlign: 'center', marginTop: 14 },
+  connectedRoot: { flex: 1, paddingHorizontal: 20 },
+  pagerViewport: { flex: 1, marginHorizontal: -20 },
+  pagerScroll: { flex: 1 },
+  pagerPage: { paddingHorizontal: 20 },
+  fillPanel: { flex: 1, justifyContent: 'space-evenly' },
+  pageCenter: { flex: 1, justifyContent: 'center' },
+  dotRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginTop: 6 },
+  dotItem: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6, paddingHorizontal: 10 },
+  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.mutedForeground, opacity: 0.5 },
+  dotActive: { backgroundColor: colors.primary, opacity: 1 },
+  dotLabel: { color: colors.mutedForeground, fontSize: 11, fontWeight: '600' },
+  dotLabelActive: { color: colors.primary, fontWeight: '700' },
+  touchpad: { flex: 1, minHeight: 100, borderRadius: 20, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.secondary, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  touchpadActive: { borderColor: colors.primary, backgroundColor: colors.accent },
+  touchpadHint: { color: colors.mutedForeground, fontSize: 12, textAlign: 'center', paddingHorizontal: 24 },
+  touchpadNote: { color: colors.mutedForeground, fontSize: 11, textAlign: 'center', marginTop: 10, marginBottom: 12 },
+  muteBar: { minHeight: 44, borderRadius: 14, backgroundColor: colors.secondary, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 10 },
+  muteBarText: { color: colors.foreground, fontSize: 13, fontWeight: '700' },
+  mediaRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  numberGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 16 },
+  numberKey: { width: '31%', minHeight: 56, borderRadius: 14, backgroundColor: colors.secondary, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+  numberKeyText: { color: colors.foreground, fontSize: 20, fontWeight: '700' },
+  colorRow: { flexDirection: 'row', gap: 8, marginBottom: 2 },
+  colorKey: { flex: 1, minHeight: 52, borderRadius: 14, backgroundColor: colors.secondary, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  colorDot: { width: 16, height: 16, borderRadius: 8 },
+  colorLabel: { color: colors.foreground, fontSize: 10, fontWeight: '600' },
 });

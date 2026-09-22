@@ -2,49 +2,19 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
-import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 import { mockupPreviewPlugin } from "./mockupPreviewPlugin";
 
-const rawPort = process.env.PORT;
+const rawPort = process.env.PORT ? Number(process.env.PORT) : 5173;
 
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
+if (Number.isNaN(rawPort) || rawPort <= 0) {
+  throw new Error(`Invalid PORT value: "${process.env.PORT}"`);
 }
 
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
-
-const basePath = process.env.BASE_PATH;
-
-if (!basePath) {
-  throw new Error(
-    "BASE_PATH environment variable is required but was not provided.",
-  );
-}
+const basePath = (process.env.BASE_PATH || "/").replace(/\/$/, "") || "/";
 
 export default defineConfig({
   base: basePath,
-  plugins: [
-    mockupPreviewPlugin(),
-    react(),
-    tailwindcss(),
-    runtimeErrorOverlay(),
-    ...(process.env.NODE_ENV !== "production" &&
-    process.env.REPL_ID !== undefined
-      ? [
-          await import("@replit/vite-plugin-cartographer").then((m) =>
-            m.cartographer({
-              root: path.resolve(import.meta.dirname, ".."),
-            }),
-          ),
-        ]
-      : []),
-  ],
+  plugins: [mockupPreviewPlugin(), react(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
@@ -56,7 +26,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    port,
+    port: rawPort,
     host: "0.0.0.0",
     allowedHosts: true,
     fs: {
@@ -64,7 +34,7 @@ export default defineConfig({
     },
   },
   preview: {
-    port,
+    port: rawPort,
     host: "0.0.0.0",
     allowedHosts: true,
   },

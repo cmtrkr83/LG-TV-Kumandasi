@@ -13,9 +13,26 @@ import {
 } from '@expo-google-fonts/inter';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { StatusBar } from 'expo-status-bar';
+import * as NavigationBar from 'expo-navigation-bar';
+import { Platform } from 'react-native';
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
+
+// Full-screen remote: hide system bars (immersive sticky — edge swipe
+// reveals the Android bar temporarily). Status bar stays hidden.
+async function applyImmersiveMode() {
+  if (Platform.OS === 'android') {
+    try {
+      await NavigationBar.setVisibilityAsync('hidden');
+    } catch {
+      // Older devices / Expo Go without the native module: stay non-immersive.
+    }
+  }
+}
+
+void applyImmersiveMode();
 
 const queryClient = new QueryClient();
 
@@ -49,6 +66,7 @@ export default function RootLayout() {
         <QueryClientProvider client={queryClient}>
           <GestureHandlerRootView>
             <KeyboardProvider>
+              <StatusBar hidden />
               <RootLayoutNav />
             </KeyboardProvider>
           </GestureHandlerRootView>
