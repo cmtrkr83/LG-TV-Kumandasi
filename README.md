@@ -1,8 +1,10 @@
 # LG TV Kumandası
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/cmtrkr)
+
 LG NetCast 3.0 / 4.0 televizyonları aynı Wi-Fi ağı üzerinden keşfedip kumanda eden yerel uygulama. Apk yı telefonunuza yükleyerek doğrudan çalıştırabilirsiniz. 
 kodlarda değişiklik yapmak için lütfen aşağıdaki adımları takip ediniz.
-reklam telemetry vs yok. ücretsiz 
+reklam telemetry vs yok. ücretsiz
 
 ## Stack
 - pnpm workspaces, Node.js 24, TypeScript 5.9
@@ -52,3 +54,10 @@ lib/db                  -> Drizzle schema
 ## Notlar
 - SSDP taraması fiziksel cihazda çalışır; web/Expo Go'da manuel IP fallback kullanılır.
 - NetCast ROAP port 8080, cleartext HTTP kullanır (Android `usesCleartextTraffic`).
+
+## Destek
+Bu projeyi faydalı bulduysanız bana bir kahve ısmarlayabilirsiniz:
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/cmtrkr)
+
+https://www.buymeacoffee.com/cmtrkr
