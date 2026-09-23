@@ -1,6 +1,8 @@
 # LG TV Kumandası
 
-LG NetCast 3.0 / 4.0 televizyonları aynı Wi-Fi ağı üzerinden keşfedip kumanda eden yerel uygulama.
+LG NetCast 3.0 / 4.0 televizyonları aynı Wi-Fi ağı üzerinden keşfedip kumanda eden yerel uygulama. Apk yı telefonunuza yükleyerek doğrudan çalıştırabilirsiniz. 
+kodlarda değişiklik yapmak için lütfen aşağıdaki adımları takip ediniz.
+reklam telemetry vs yok. ücretsiz 
 
 ## Stack
 - pnpm workspaces, Node.js 24, TypeScript 5.9
