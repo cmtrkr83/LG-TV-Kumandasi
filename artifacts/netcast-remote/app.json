@@ -20,6 +20,7 @@
       }
     },
     "android": {
+      "package": "com.cmtrkr83.netcastremote",
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
