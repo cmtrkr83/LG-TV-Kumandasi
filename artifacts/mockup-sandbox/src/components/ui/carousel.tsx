@@ -19,6 +19,19 @@ type CarouselProps = {
   setApi?: (api: CarouselApi) => void
 }
 
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+
+  return (
+    target.isContentEditable ||
+    target.closest(
+      'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'
+    ) !== null
+  )
+}
+
 type CarouselContextProps = {
   carouselRef: ReturnType<typeof useEmblaCarousel>[0]
   api: ReturnType<typeof useEmblaCarousel>[1]
@@ -85,15 +98,24 @@ const Carousel = React.forwardRef<
 
     const handleKeyDown = React.useCallback(
       (event: React.KeyboardEvent<HTMLDivElement>) => {
-        if (event.key === "ArrowLeft") {
+        if (event.defaultPrevented || isEditableEventTarget(event.target)) {
+          return
+        }
+
+        const previousKey =
+          orientation === "horizontal" ? "ArrowLeft" : "ArrowUp"
+        const nextKey =
+          orientation === "horizontal" ? "ArrowRight" : "ArrowDown"
+
+        if (event.key === previousKey) {
           event.preventDefault()
           scrollPrev()
-        } else if (event.key === "ArrowRight") {
+        } else if (event.key === nextKey) {
           event.preventDefault()
           scrollNext()
         }
       },
-      [scrollPrev, scrollNext]
+      [orientation, scrollPrev, scrollNext]
     )
 
     React.useEffect(() => {
@@ -114,7 +136,8 @@ const Carousel = React.forwardRef<
       api.on("select", onSelect)
 
       return () => {
-        api?.off("select", onSelect)
+        api.off("reInit", onSelect)
+        api.off("select", onSelect)
       }
     }, [api, onSelect])
 

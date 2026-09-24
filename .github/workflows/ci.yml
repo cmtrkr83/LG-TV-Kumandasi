@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  minimum-node-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a
+        with:
+          version: 12.6.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.3.0
+          cache: pnpm
+      - run: node --version
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck:tests
+      - run: pnpm run test
+
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version:
+          - 24.x
+    env:
+      BASE_PATH: /
+      PUBLIC_ORIGIN: https://example.test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: pnpm/action-setup@a15d269cd4658e1107c09f1fabf4cbd7bd1f308a
+        with:
+          version: 12.6.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run codegen:check
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - run: pnpm run lint
+      - run: pnpm run format:check
+      - run: pnpm run doctor
+      - run: pnpm run audit
+      - run: pnpm run build

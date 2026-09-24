@@ -7,18 +7,21 @@ kodlarda değişiklik yapmak için lütfen aşağıdaki adımları takip ediniz.
 reklam telemetry vs yok. ücretsiz
 
 ## Stack
-- pnpm workspaces, Node.js 24, TypeScript 5.9
+- pnpm workspaces, Node.js >=24.3.0, TypeScript 6.0.3
 - API: Express 5
 - DB: PostgreSQL + Drizzle ORM
 - App: Expo 57 + React Native 0.86 + expo-router
 - Keşif: `expo-ssdp` (SSDP M-SEARCH/B-SEARCH) + `expo-network` subnet fallback (ROAP `http://<tv>:8080/roap/api/`)
-- Doğrulama: Zod, `drizzle-zod`, Orval (OpenAPI)
+- Doğrulama: Zod, Orval (OpenAPI)
 
 ## Çalıştırma
 ```bash
-pnpm install
+corepack enable
+pnpm install --frozen-lockfile
 pnpm run typecheck
-pnpm run build
+pnpm run test
+pnpm run lint
+PUBLIC_ORIGIN=https://example.test pnpm run build
 
 # API Server (PORT gerekli)
 PORT=5000 pnpm --filter @workspace/api-server run dev
@@ -27,18 +30,43 @@ PORT=5000 pnpm --filter @workspace/api-server run dev
 
 # NetCast Kumanda (Expo)
 pnpm --filter @workspace/netcast-remote run dev
-# pnpm --filter @workspace/netcast-remote run build  # static build
-# pnpm --filter @workspace/netcast-remote run serve
+# PUBLIC_ORIGIN=https://example.test pnpm --filter @workspace/netcast-remote run build
+# PUBLIC_ORIGIN=https://example.test pnpm --filter @workspace/netcast-remote run serve
 
 # Mockup Sandbox
 pnpm --filter @workspace/mockup-sandbox run dev
 ```
 
+CI ve yerel doğrulama için `pnpm run verify`, `pnpm run audit` ve `pnpm run doctor` komutları da kullanılabilir. `verify`, Orval generated-diff kontrolünü, typecheck, test, lint ve format kontrolünü sırayla çalıştırır.
+
 ## Ortam Değişkenleri
-- `DATABASE_URL` — Postgres bağlantısı (api-server, db push için)
+- `PUBLIC_ORIGIN` — NetCast static build ve serve için zorunlu canonical origin; origin dışında path, query veya fragment içermez. CI smoke build için `https://example.test` kullanabilir.
+- `BASE_PATH` — NetCast static build/serve ve mockup Vite için güvenli absolute path; varsayılan `/`. `..`, backslash ve geçersiz percent encoding kullanılmaz.
+- `DATABASE_URL` — Postgres bağlantısı (api-server ve reviewed DB akışı için)
 - `PORT` — API/mockup için port (varsayılan: api 5000, mockup 5173)
-- `BASE_PATH` — Vite base path (mockup)
-- `EXPO_PUBLIC_DOMAIN` / `DEPLOYMENT_DOMAIN` — netcast-remote static build için domain
+- `EXPO_PUBLIC_DOMAIN` / `DEPLOYMENT_DOMAIN` — `PUBLIC_ORIGIN` verilmediğinde netcast-remote static build için fallback domain
+
+## Expo Doctor
+
+Expo Doctor netcast-remote paketinde çalıştırılır ve SDK 57 eşleşmelerini doğrular. Doctor için Node >=24.3.0 ve repository `packageManager` sürümü (`pnpm@12.6.0`) kullanılmalıdır. Beklenen bağlantı sürümleri `expo ~57.0.24`, `expo-build-properties ~57.0.21`, `expo-constants ~57.0.19`, `expo-image-picker ~57.0.19`, `expo-location ~57.0.19` ve `expo-router ~57.0.22` değerleridir:
+
+```bash
+pnpm run doctor
+```
+
+## Güvenlik override'ları
+
+`xcode@3.0.1` için `uuid@11.1.1` ve `query-string@7.1.3` için resmi `decode-uri-component@0.5.0` hedefli olarak override edilir. İkinci paket ESM olduğu için `query-string` CJS çağrısına yalnızca default export interop ekleyen `tests/fixtures/patches/query-string@7.1.3.patch` uygulanır; bu uyumluluk `tests/dependency-compatibility.test.ts` ve Expo build ile doğrulanır.
+
+## DB akışı
+
+DB değişiklikleri için doğrudan force push kullanılmaz. Şema değişikliği üretilir, gözden geçirilir ve uygulanır:
+
+```bash
+pnpm --filter @workspace/db run generate
+pnpm --filter @workspace/db run check
+pnpm --filter @workspace/db run migrate
+```
 
 ## Yapı
 ```

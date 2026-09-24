@@ -10,7 +10,8 @@
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "NetCast TV’leri aynı Wi‑Fi ağında bulmak ve kumandayı çalıştırmak için yerel ağ erişimi gerekir."
+        "NSLocalNetworkUsageDescription": "NetCast TV’leri aynı Wi‑Fi ağında bulmak ve kumandayı çalıştırmak için yerel ağ erişimi gerekir.",
+        "NSAllowsLocalNetworking": true
       }
     },
     "android": {

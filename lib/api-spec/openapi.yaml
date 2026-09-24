@@ -16,21 +16,143 @@ paths:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
+      description: Process liveness check. This endpoint does not assert database readiness.
       responses:
         "200":
-          description: Healthy
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HealthStatus"
+          $ref: "#/components/responses/HealthOk"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /livez:
+    get:
+      operationId: livenessCheck
+      tags: [health]
+      summary: Liveness check
+      description: Confirms that the API process can serve requests without asserting dependency readiness.
+      responses:
+        "200":
+          $ref: "#/components/responses/HealthOk"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /readyz:
+    get:
+      operationId: readinessCheck
+      tags: [health]
+      summary: Readiness check
+      description: Reports process readiness and explicitly identifies dependencies that are not checked.
+      responses:
+        "200":
+          $ref: "#/components/responses/ReadinessOk"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 components:
   schemas:
     HealthStatus:
       type: object
+      additionalProperties: false
       properties:
         status:
           type: string
+          enum:
+            - ok
       required:
         - status
-
+    ReadinessStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - not_ready
+        checks:
+          type: object
+          additionalProperties: false
+          properties:
+            database:
+              type: string
+              enum:
+                - not_checked
+          required:
+            - database
+      required:
+        - status
+        - checks
+    ProblemDetails:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - title
+        - status
+        - detail
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        requestId:
+          type: string
+  responses:
+    HealthOk:
+      description: The API process is live.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HealthStatus"
+    ReadinessOk:
+      description: The API process is ready to receive requests.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ReadinessStatus"
+    BadRequest:
+      description: The request could not be understood.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    PayloadTooLarge:
+      description: The request body exceeds the configured limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    InternalServerError:
+      description: The server could not complete the request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    ServiceUnavailable:
+      description: The service is not ready to receive requests.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"

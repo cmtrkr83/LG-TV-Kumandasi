@@ -11,6 +11,10 @@ out-tsc
 # dependencies
 node_modules
 
+.env
+.env.*
+!.env.example
+
 # IDEs and editors
 /.idea
 .project
@@ -46,3 +50,6 @@ Thumbs.db
 
 .cache/
 .local/
+artifacts/netcast-remote/.netcast-remote-build.lock
+artifacts/netcast-remote/.netcast-remote-build-*
+artifacts/netcast-remote/.static-build-backup-*

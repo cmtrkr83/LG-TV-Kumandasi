@@ -1,17 +1,15 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Haptics from 'expo-haptics';
-import * as Network from 'expo-network';
+import * as Haptics from 'expo-haptics'
+import * as Network from 'expo-network'
 import {
-  getNetworkInterfaces,
   isAvailable as isSsdpAvailable,
   listenForNotifications,
   searchStream,
   type SsdpDevice,
   type SsdpNotifyEvent,
-} from 'expo-ssdp';
-import { Feather } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+} from 'expo-ssdp'
+import { Feather } from '@expo/vector-icons'
+import { useFocusEffect } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -25,38 +23,58 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import colors from '@/constants/colors';
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import colors from '@/constants/colors'
+import {
+  isAbortErrorKind,
+  isAuthError,
+  isTransientError,
+  isUnsupportedError,
+  normalizeHost,
+  requestPairingKey,
+  createSession,
+  sendCommand,
+  sendTouchClick,
+  sendTouchMove,
+  sendTouchWheel,
+  type Connection,
+} from '@/protocol/netcast'
+import { getSafeScanHosts, scanLocalSubnet } from '@/protocol/scan'
+import { QueueBackpressureError, QueueClosedError, SerialRequestQueue, type QueueKey } from '@/protocol/requestQueue'
+import {
+  clearPersistedConnection,
+  loadPersistedConnection,
+  savePersistedConnection,
+  StorageError,
+} from '@/storage/connectionStorage'
 
-const STORAGE_KEY = 'netcast-remote-connection';
-const XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>';
-const PORT = 8080;
-
-type Connection = {
-  host: string;
-  accessToken: string;
-  session?: string;
-  name?: string;
-};
+const SSDP_TIMEOUT_MS = 8000
 
 type DiscoveredTv = {
-  id: string;
-  host: string;
-  name: string;
-  online: boolean;
-  model?: string;
-  server?: string;
-};
+  id: string
+  host: string
+  name: string
+  online: boolean
+  model?: string
+  server?: string
+}
 
 type RemoteCommand = {
-  key: number;
-  label: string;
-  icon: keyof typeof Feather.glyphMap;
-  tone?: 'primary' | 'soft' | 'danger';
-};
+  key: number
+  label: string
+  icon: keyof typeof Feather.glyphMap
+  tone?: 'primary' | 'soft' | 'danger'
+}
 
-// ROAP HandleKeyInput decimal codes (NetCast 3/4, models > 2012).
-// Reference: b-jesch/service.lgtv.remote KEYCODES.LG (ROAP section).
+type HoldContext = {
+  repeating: boolean
+}
+
+type HoldHandler = (
+  command: RemoteCommand,
+  context?: HoldContext,
+) => void | (() => void)
+
 const COMMANDS = {
   POWER: 1,
   NUM_0: 2,
@@ -89,8 +107,8 @@ const COMMANDS = {
   PLAY: 33,
   PAUSE: 34,
   STOP: 35,
-  REWIND: 36,
-  FAST_FORWARD: 37,
+  REWIND: 37,
+  FAST_FORWARD: 36,
   LIVE_TV: 43,
   GUIDE: 44,
   INFO: 45,
@@ -104,52 +122,27 @@ const COMMANDS = {
   QUICK_MENU: 405,
   EXIT: 412,
   APPS: 417,
-} as const;
+} as const
 
-const SSDP_TIMEOUT_MS = 8000;
-const DIRECT_SCAN_TIMEOUT_MS = 450;
-const DIRECT_SCAN_BATCH_SIZE = 32;
 const NETCAST_SEARCH_TARGETS = [
   'ssdp:all',
   'udap:rootservice',
   'urn:schemas-udap:service:netrcu:1',
   'urn:schemas-udap:service:smartText:1',
-];
-
-function tvUrl(host: string, path: string) {
-  return `http://${host.trim()}:${PORT}/roap/api/${path}`;
-}
-
-async function postXml(url: string, body: string) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/atom+xml' },
-    body,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`TV yanıtı ${response.status}`);
-  }
-  return text;
-}
-
-function xmlValue(xml: string, tag: string) {
-  const match = xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`));
-  return match?.[1] ?? '';
-}
+]
 
 function getSsdpHeader(device: SsdpDevice, ...names: string[]) {
-  const headers = device.headers ?? {};
+  const headers = device.headers ?? {}
   for (const name of names) {
-    const matchingKey = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
-    if (matchingKey && headers[matchingKey]) return headers[matchingKey];
+    const matchingKey = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase())
+    if (matchingKey && headers[matchingKey]) return headers[matchingKey]
   }
-  return '';
+  return ''
 }
 
 function toNetCastTv(device: SsdpDevice): DiscoveredTv | null {
-  const model = getSsdpHeader(device, 'modelname', 'model-name', 'model', 'friendlyname', 'device-name');
-  const server = device.server ?? getSsdpHeader(device, 'server');
+  const model = getSsdpHeader(device, 'modelname', 'model-name', 'model', 'friendlyname', 'device-name')
+  const server = device.server ?? getSsdpHeader(device, 'server')
   const responseText = [
     model,
     server,
@@ -159,12 +152,9 @@ function toNetCastTv(device: SsdpDevice): DiscoveredTv | null {
     ...Object.values(device.headers ?? {}),
   ]
     .join(' ')
-    .toLowerCase();
+    .toLowerCase()
 
-  // NetCast responses frequently identify themselves only as
-  // `udap:rootservice`, `/udap/api/`, or a model code such as `47LN5750`.
-  // Requiring the literal "LG" here silently discarded real LG TVs.
-  if (!/lg|lge|netcast|udap|rootservice|schemas-udap/.test(responseText)) return null;
+  if (!/lg|lge|netcast|udap|rootservice|schemas-udap/.test(responseText)) return null
 
   return {
     id: device.usn?.split('::')[0] || `${device.address}:${device.location ?? ''}`,
@@ -173,20 +163,20 @@ function toNetCastTv(device: SsdpDevice): DiscoveredTv | null {
     online: true,
     model: model || undefined,
     server: server || undefined,
-  };
+  }
 }
 
 function upsertDiscoveredTv(previous: DiscoveredTv[], tv: DiscoveredTv) {
-  const existingIndex = previous.findIndex((item) => item.id === tv.id || item.host === tv.host);
-  if (existingIndex === -1) return [...previous, tv];
+  const existingIndex = previous.findIndex((item) => item.id === tv.id || item.host === tv.host)
+  if (existingIndex === -1) return [...previous, tv]
 
-  const next = [...previous];
-  next[existingIndex] = { ...next[existingIndex], ...tv, online: true };
-  return next;
+  const next = [...previous]
+  next[existingIndex] = { ...next[existingIndex], ...tv, online: true }
+  return next
 }
 
 function notifyDeviceId(event: SsdpNotifyEvent) {
-  return event.usn?.split('::')[0] ?? '';
+  return event.usn?.split('::')[0] ?? ''
 }
 
 function notifyLooksLikeNetCast(event: SsdpNotifyEvent) {
@@ -197,130 +187,49 @@ function notifyLooksLikeNetCast(event: SsdpNotifyEvent) {
     ...Object.values(event.headers ?? {}),
   ]
     .join(' ')
-    .toLowerCase();
-  return /lg|lge|netcast|udap|rootservice|schemas-udap/.test(eventText);
+    .toLowerCase()
+  return /lg|lge|netcast|udap|rootservice|schemas-udap/.test(eventText)
 }
 
 function tvMatchesNotification(tv: DiscoveredTv, event: SsdpNotifyEvent) {
-  const deviceId = notifyDeviceId(event);
-  return tv.host === event.address || (Boolean(deviceId) && tv.id === deviceId);
+  const deviceId = notifyDeviceId(event)
+  return tv.host === event.address || (Boolean(deviceId) && tv.id === deviceId)
 }
 
-function extractNetCastName(xml: string) {
-  const match = xml.match(/<friendlyName>([^<]+)<\/friendlyName>/i);
-  return match?.[1]?.trim() || 'LG NetCast TV';
+function tvMatchesHost(tv: DiscoveredTv, address: string) {
+  return tv.host === address
 }
 
-async function probeNetCastHost(host: string): Promise<DiscoveredTv | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DIRECT_SCAN_TIMEOUT_MS);
+function safeSelectionHaptic() {
   try {
-    const response = await fetch(
-      `http://${host}:${PORT}/roap/api/data?target=rootservice.xml`,
-      {
-        headers: { Accept: 'application/xml', 'User-Agent': 'UDAP/2.0' },
-        signal: controller.signal,
-      },
-    );
-    if (!response.ok) return null;
-    const body = await response.text();
-    if (!body.includes('<') || !/friendlyName|rootservice|udap/i.test(body)) return null;
-    return {
-      id: `netcast:${host}`,
-      host,
-      name: extractNetCastName(body),
-      online: true,
-      model: extractNetCastName(body),
-      server: 'UDAP/NetCast',
-    };
+    void Haptics.selectionAsync().catch(() => undefined)
   } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
+    return
   }
 }
 
-async function scanLocalSubnet(onFound: (tv: DiscoveredTv) => void) {
-  const localIp = await Network.getIpAddressAsync();
-  const octets = localIp.split('.');
-  if (octets.length !== 4 || octets.some((octet) => !/^\d+$/.test(octet))) {
-    throw new Error('NO_WIFI');
-  }
-
-  const prefix = octets.slice(0, 3).join('.');
-  const ownHost = Number(octets[3]);
-  const hosts = Array.from({ length: 254 }, (_, index) => `${prefix}.${index + 1}`).filter(
-    (host) => host !== `${prefix}.${ownHost}`,
-  );
-
-  for (let index = 0; index < hosts.length; index += DIRECT_SCAN_BATCH_SIZE) {
-    const batch = hosts.slice(index, index + DIRECT_SCAN_BATCH_SIZE);
-    const results = await Promise.all(batch.map((host) => probeNetCastHost(host)));
-    for (const tv of results) {
-      if (tv) onFound(tv);
-    }
+function safeImpactHaptic() {
+  try {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined)
+  } catch {
+    return
   }
 }
 
-async function requestPairingKey(host: string) {
-  return postXml(
-    tvUrl(host, 'auth'),
-    `${XML_HEADER}<auth><type>AuthKeyReq</type></auth>`,
-  );
+function commandFailureMessage(error: unknown) {
+  if (error instanceof QueueBackpressureError) return 'TV isteği kuyruğu dolu; kısa süre sonra tekrar deneyin.'
+  if (isUnsupportedError(error)) return 'TV bu komutu desteklemiyor.'
+  if (isTransientError(error)) return 'TV geçici olarak yanıt vermiyor.'
+  if (isAbortErrorKind(error)) return ''
+  return 'TV isteği gönderilemedi.'
 }
 
-async function createSession(host: string, accessToken: string) {
-  const response = await postXml(
-    tvUrl(host, 'auth'),
-    `${XML_HEADER}<auth><type>AuthReq</type><value>${accessToken}</value></auth>`,
-  );
-  const session = xmlValue(response, 'session');
-  if (!session) {
-    throw new Error('Eşleştirme anahtarı kabul edilmedi.');
-  }
-  return session;
+function storageFailureMessage() {
+  return 'Bağlantı bilgileri cihazda saklanamadı; oturum yine de kullanılabilir.'
 }
 
-async function sendCommand(connection: Connection, key: number) {
-  if (!connection.session) {
-    throw new Error('TV bağlantısı hazır değil.');
-  }
-  await postXml(
-    tvUrl(connection.host, 'command'),
-    `${XML_HEADER}<command><session>${connection.session}</session><type>HandleKeyInput</type><value>${key}</value></command>`,
-  );
-}
-
-// Mouse / touchpad control over the same ROAP session as the keys.
-// Payload shape mirrors ConnectSDK's NetcastTVService (UDAP params
-// name/x/y/value mapped into our ROAP <command> envelope):
-//   move  -> <type>HandleTouchMove</type><x>dx</x><y>dy</y>   (relative deltas, ints)
-//   click -> <type>HandleTouchClick</type>
-//   wheel -> <type>HandleTouchWheel</type><value>up|down</value>
-// The TV summons the cursor on first movement; no separate pairing needed.
-async function sendRawCommand(connection: Connection, innerXml: string) {
-  if (!connection.session) {
-    throw new Error('TV bağlantısı hazır değil.');
-  }
-  await postXml(
-    tvUrl(connection.host, 'command'),
-    `${XML_HEADER}<command><session>${connection.session}</session>${innerXml}</command>`,
-  );
-}
-
-async function sendTouchMove(connection: Connection, dx: number, dy: number) {
-  await sendRawCommand(
-    connection,
-    `<type>HandleTouchMove</type><x>${Math.round(dx)}</x><y>${Math.round(dy)}</y>`,
-  );
-}
-
-async function sendTouchClick(connection: Connection) {
-  await sendRawCommand(connection, `<type>HandleTouchClick</type>`);
-}
-
-async function sendTouchWheel(connection: Connection, direction: 'up' | 'down') {
-  await sendRawCommand(connection, `<type>HandleTouchWheel</type><value>${direction}</value>`);
+function storageReadFailureMessage() {
+  return 'Kayıtlı bağlantı bilgileri okunamadı; manuel IP ile devam edebilirsiniz.'
 }
 
 function IconButton({
@@ -396,22 +305,29 @@ function PressHoldButton({
   seam,
 }: {
   command: RemoteCommand;
-  onHold: (command: RemoteCommand) => void;
+  onHold: HoldHandler;
   disabled?: boolean;
   /** Bare half inside a joined rocker pill (container provides bg/shape). */
   flat?: boolean;
   /** Divider line under this half (used for the top half of a rocker). */
   seam?: boolean;
 }) {
-  const timers = useRef<{ delay?: ReturnType<typeof setTimeout>; repeat?: ReturnType<typeof setInterval> }>({});
+  const timers = useRef<{ delay?: ReturnType<typeof setTimeout>; repeat?: ReturnType<typeof setInterval> }>({})
+  const cancelRef = useRef<(() => void) | null>(null)
 
   const stop = useCallback(() => {
-    if (timers.current.delay) clearTimeout(timers.current.delay);
-    if (timers.current.repeat) clearInterval(timers.current.repeat);
-    timers.current = {};
-  }, []);
+    if (timers.current.delay !== undefined) clearTimeout(timers.current.delay)
+    if (timers.current.repeat !== undefined) clearInterval(timers.current.repeat)
+    timers.current = {}
+    const cancel = cancelRef.current
+    cancelRef.current = null
+    cancel?.()
+  }, [])
 
-  useEffect(() => stop, [stop]);
+  useEffect(() => {
+    if (disabled) stop()
+    return stop
+  }, [disabled, stop])
 
   return (
     <Pressable
@@ -420,12 +336,17 @@ function PressHoldButton({
       testID={`remote-${command.label}`}
       disabled={disabled}
       onPressIn={() => {
-        if (disabled) return;
-        void Haptics.selectionAsync();
-        onHold(command);
+        if (disabled) return
+        stop()
+        safeSelectionHaptic()
+        const cancel = onHold(command, { repeating: false })
+        cancelRef.current = typeof cancel === 'function' ? cancel : null
         timers.current.delay = setTimeout(() => {
-          timers.current.repeat = setInterval(() => onHold(command), HOLD_REPEAT_MS);
-        }, HOLD_INITIAL_DELAY_MS);
+          timers.current.repeat = setInterval(() => {
+            const cancel = onHold(command, { repeating: true })
+            if (typeof cancel === 'function') cancelRef.current = cancel
+          }, HOLD_REPEAT_MS)
+        }, HOLD_INITIAL_DELAY_MS)
       }}
       onPressOut={stop}
       onBlur={stop}
@@ -494,41 +415,58 @@ function TouchPad({
   onActiveChange: (active: boolean) => void;
   disabled?: boolean;
 }) {
-  const [touching, setTouching] = useState(false);
-  const gesture = useRef({ lastX: 0, lastY: 0, startT: 0 });
+  const [touching, setTouching] = useState(false)
+  const gesture = useRef({ lastX: 0, lastY: 0, startT: 0 })
+  const disabledRef = useRef(disabled)
+  const onMoveRef = useRef(onMove)
+  const onTapRef = useRef(onTap)
+  const onActiveChangeRef = useRef(onActiveChange)
+  disabledRef.current = disabled
+  onMoveRef.current = onMove
+  onTapRef.current = onTap
+  onActiveChangeRef.current = onActiveChange
 
   const pan = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => !disabled,
-      onMoveShouldSetPanResponder: () => !disabled,
+      onStartShouldSetPanResponder: () => !disabledRef.current,
+      onMoveShouldSetPanResponder: () => !disabledRef.current,
       onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: () => {
-        gesture.current = { lastX: 0, lastY: 0, startT: Date.now() };
-        setTouching(true);
-        onActiveChange(true);
+        if (disabledRef.current) return
+        gesture.current = { lastX: 0, lastY: 0, startT: Date.now() }
+        setTouching(true)
+        onActiveChangeRef.current(true)
       },
       onPanResponderMove: (_, gestureState) => {
-        const rawDx = (gestureState.dx - gesture.current.lastX) * MOUSE_SENSITIVITY;
-        const rawDy = (gestureState.dy - gesture.current.lastY) * MOUSE_SENSITIVITY;
-        gesture.current.lastX = gestureState.dx;
-        gesture.current.lastY = gestureState.dy;
-        const dx = Math.max(-MOUSE_MAX_STEP, Math.min(MOUSE_MAX_STEP, rawDx));
-        const dy = Math.max(-MOUSE_MAX_STEP, Math.min(MOUSE_MAX_STEP, rawDy));
-        if (dx !== 0 || dy !== 0) onMove(dx, dy);
+        if (disabledRef.current) return
+        const rawDx = (gestureState.dx - gesture.current.lastX) * MOUSE_SENSITIVITY
+        const rawDy = (gestureState.dy - gesture.current.lastY) * MOUSE_SENSITIVITY
+        gesture.current.lastX = gestureState.dx
+        gesture.current.lastY = gestureState.dy
+        const dx = Math.max(-MOUSE_MAX_STEP, Math.min(MOUSE_MAX_STEP, rawDx))
+        const dy = Math.max(-MOUSE_MAX_STEP, Math.min(MOUSE_MAX_STEP, rawDy))
+        if (dx !== 0 || dy !== 0) onMoveRef.current(dx, dy)
       },
       onPanResponderRelease: (_, gestureState) => {
-        const dist = Math.hypot(gestureState.dx, gestureState.dy);
-        const dt = Date.now() - gesture.current.startT;
-        setTouching(false);
-        onActiveChange(false);
-        if (dist <= TAP_MAX_DIST && dt <= TAP_MAX_MS && !disabled) onTap();
+        const dist = Math.hypot(gestureState.dx, gestureState.dy)
+        const dt = Date.now() - gesture.current.startT
+        setTouching(false)
+        onActiveChangeRef.current(false)
+        if (dist <= TAP_MAX_DIST && dt <= TAP_MAX_MS && !disabledRef.current) onTapRef.current()
       },
       onPanResponderTerminate: () => {
-        setTouching(false);
-        onActiveChange(false);
+        setTouching(false)
+        onActiveChangeRef.current(false)
       },
     }),
-  ).current;
+  ).current
+
+  useEffect(() => {
+    if (disabled) {
+      setTouching(false)
+      onActiveChangeRef.current(false)
+    }
+  }, [disabled])
 
   return (
     <View
@@ -650,7 +588,7 @@ function RemotePad({
   padSize,
 }: {
   onCommand: (command: RemoteCommand) => void;
-  onRepeatKey: (command: RemoteCommand) => void;
+  onRepeatKey: HoldHandler;
   busy: boolean;
   /** D-pad circle diameter, computed from measured pager height. */
   padSize: number;
@@ -834,421 +772,717 @@ function RemotePad({
 }
 
 export default function HomeScreen() {
-  const insets = useSafeAreaInsets();
-  const [connection, setConnection] = useState<Connection | null>(null);
-  const [host, setHost] = useState('');
-  const [pairingKey, setPairingKey] = useState('');
-  const [tvName, setTvName] = useState('LG NetCast TV');
-  const [status, setStatus] = useState('TV IP adresini girerek başlayın.');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [commandBusy, setCommandBusy] = useState(false);
-  const [showPairing, setShowPairing] = useState(false);
-  const [discoveredTvs, setDiscoveredTvs] = useState<DiscoveredTv[]>([]);
-  const [scanning, setScanning] = useState(false);
-  const [selectedTvId, setSelectedTvId] = useState('');
-  const scanId = useRef(0);
-  const knownTvAddresses = useRef(new Set<string>());
-  const knownTvIds = useRef(new Set<string>());
-  const refreshingNotificationHosts = useRef(new Set<string>());
-  const notificationOnlineState = useRef(new Map<string, boolean>());
-  const liveListenerGeneration = useRef(0);
+  const insets = useSafeAreaInsets()
+  const [connection, setConnection] = useState<Connection | null>(null)
+  const [host, setHost] = useState('')
+  const [pairingKey, setPairingKey] = useState('')
+  const [tvName, setTvName] = useState('LG NetCast TV')
+  const [status, setStatus] = useState('TV IP adresini girerek başlayın.')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [commandBusy, setCommandBusy] = useState(false)
+  const [showPairing, setShowPairing] = useState(false)
+  const [discoveredTvs, setDiscoveredTvs] = useState<DiscoveredTv[]>([])
+  const [scanning, setScanning] = useState(false)
+  const [selectedTvId, setSelectedTvId] = useState('')
+  const [page, setPage] = useState(1)
+  const [pagerLocked, setPagerLocked] = useState(false)
+  const [pagerHeight, setPagerHeight] = useState(0)
 
-  const connected = Boolean(connection?.session);
-  const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host]);
+  const generationRef = useRef(0)
+  const connectionRef = useRef<Connection | null>(null)
+  const hostRef = useRef('')
+  const pairingControllerRef = useRef<AbortController | null>(null)
+  const restoreControllerRef = useRef<AbortController | null>(null)
+  const connectionControllerRef = useRef<AbortController | null>(null)
+  const commandQueueRef = useRef<SerialRequestQueue | null>(null)
+  const commandBusyRef = useRef(false)
+  const repeatTokensRef = useRef(new Map<number, object>())
+  const scanId = useRef(0)
+  const scanControllerRef = useRef<AbortController | null>(null)
+  const scanGeneratorRef = useRef<AsyncGenerator<SsdpDevice, void, undefined> | null>(null)
+  const notificationGeneratorsRef = useRef(new Map<string, AsyncGenerator<SsdpDevice, void, undefined>>())
+  const knownTvAddresses = useRef(new Set<string>())
+  const listedTvHostsRef = useRef(new Set<string>())
+  const knownTvIds = useRef(new Set<string>())
+  const refreshingNotificationHosts = useRef(new Set<string>())
+  const notificationOnlineState = useRef(new Map<string, boolean>())
+  const liveListenerGeneration = useRef(0)
+  const mouseAccum = useRef({ x: 0, y: 0 })
+  const mouseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mouseFails = useRef(0)
+
+  const connected = Boolean(connection?.session)
+  const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host])
+
+  const cancelScan = useCallback(() => {
+    scanControllerRef.current?.abort()
+    scanControllerRef.current = null
+    const generator = scanGeneratorRef.current
+    scanGeneratorRef.current = null
+    if (generator) void generator.return(undefined).catch(() => undefined)
+    scanId.current += 1
+  }, [])
+
+  const cancelNotificationSearches = useCallback(() => {
+    for (const generator of notificationGeneratorsRef.current.values()) {
+      void generator.return(undefined).catch(() => undefined)
+    }
+    notificationGeneratorsRef.current.clear()
+    refreshingNotificationHosts.current.clear()
+  }, [])
+
+  const clearMouseRuntime = useCallback(() => {
+    if (mouseTimer.current !== null) clearTimeout(mouseTimer.current)
+    mouseTimer.current = null
+    mouseAccum.current = { x: 0, y: 0 }
+    mouseFails.current = 0
+  }, [])
+
+  const clearConnectionRuntime = useCallback(() => {
+    generationRef.current += 1
+    pairingControllerRef.current?.abort()
+    restoreControllerRef.current?.abort()
+    connectionControllerRef.current?.abort()
+    connectionControllerRef.current = null
+    pairingControllerRef.current = null
+    restoreControllerRef.current = null
+    commandQueueRef.current?.clear()
+    commandQueueRef.current = null
+    cancelScan()
+    cancelNotificationSearches()
+    repeatTokensRef.current.clear()
+    connectionRef.current = null
+    commandBusyRef.current = false
+    clearMouseRuntime()
+    setConnection(null)
+    setCommandBusy(false)
+    setPagerLocked(false)
+    setScanning(false)
+    setLoading(false)
+    return generationRef.current
+  }, [cancelNotificationSearches, cancelScan, clearMouseRuntime])
+
+  const handleSessionAuthFailure = useCallback(() => {
+    const generation = clearConnectionRuntime()
+    setPairingKey('')
+    setShowPairing(true)
+    setSelectedTvId('')
+    setTvName('LG NetCast TV')
+    setError('TV oturumu sona erdi. Yeni eşleştirme yapın.')
+    setStatus('Yeni eşleştirme bekleniyor.')
+    void clearPersistedConnection().catch(() => {
+      if (generation !== generationRef.current) return
+      setError('Oturum kapatıldı; kayıt temizlenemedi.')
+    })
+  }, [clearConnectionRuntime])
+
+  const activateConnection = useCallback((next: Connection, generation: number) => {
+    if (generation !== generationRef.current) return
+    commandQueueRef.current?.clear()
+    commandQueueRef.current = null
+    clearMouseRuntime()
+    const queue = new SerialRequestQueue({
+      maxPendingEntries: 64,
+      maxMoveMagnitude: 240,
+      moveTask: (dx, dy, signal) => sendTouchMove(next, dx, dy, signal),
+      onBackpressure: () => {
+        if (generation !== generationRef.current) return
+        setStatus('Fare hareketi kuyruğu dolu; bazı hareketler birleştirildi.')
+      },
+      onMoveSuccess: () => {
+        if (generation === generationRef.current) mouseFails.current = 0
+      },
+      onMoveError: (error) => {
+        if (generation !== generationRef.current) return
+        if (isAuthError(error)) {
+          handleSessionAuthFailure()
+          return
+        }
+        if (isUnsupportedError(error)) {
+          const message = commandFailureMessage(error)
+          setError(message)
+          setStatus(message)
+          return
+        }
+        mouseFails.current += 1
+        if (mouseFails.current >= 3) {
+          mouseFails.current = 0
+          const message = commandFailureMessage(error)
+          setError(message)
+          setStatus(message)
+        } else {
+          setStatus('Fare hareketi gönderiliyor…')
+        }
+      },
+    })
+    commandQueueRef.current = queue
+    connectionRef.current = next
+    hostRef.current = next.host
+    setHost(next.host)
+    setTvName(next.name ?? 'LG NetCast TV')
+    setPairingKey('')
+    setShowPairing(false)
+    setSelectedTvId('')
+    setError('')
+    commandBusyRef.current = false
+    setCommandBusy(false)
+    setPagerLocked(false)
+    setConnection(next)
+  }, [clearMouseRuntime, handleSessionAuthFailure])
 
   useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEY)
-      .then(async (saved) => {
-        if (!saved) return;
-        const stored = JSON.parse(saved) as Connection;
-        setHost(stored.host);
-        setPairingKey(stored.accessToken);
-        setStatus('Kayıtlı TV aranıyor…');
-        try {
-          const session = await createSession(stored.host, stored.accessToken);
-          setConnection({ ...stored, session });
-          setTvName(stored.name ?? 'LG NetCast TV');
-          setStatus('Bağlantı hazır');
-        } catch {
-          setStatus('Kayıtlı bağlantı yeniden eşleştirme bekliyor.');
+    const controller = new AbortController()
+    const generation = ++generationRef.current
+    restoreControllerRef.current = controller
+    connectionControllerRef.current = controller
+    let active = true
+    const isCurrent = () => active && generation === generationRef.current && connectionControllerRef.current === controller && !controller.signal.aborted
+
+     void (async () => {
+       if (Platform.OS === 'web') {
+         if (isCurrent()) {
+           setError('Web üzerinde TV eşleştirme yapılamaz. Fiziksel Android veya iOS cihaz kullanın.')
+           setStatus('Fiziksel cihaz gerekli.')
+         }
+         return
+       }
+       let loaded
+      try {
+        loaded = await loadPersistedConnection()
+      } catch (storageError) {
+        if (!isCurrent()) return
+        setError(storageError instanceof StorageError ? storageReadFailureMessage() : 'Bağlantı bilgileri okunamadı.')
+        setStatus('Kayıtlı bağlantı yüklenemedi.')
+        return
+      }
+
+      if (!isCurrent()) return
+      if (loaded.status === 'missing') return
+      if (loaded.status === 'invalid') {
+        if (loaded.host) {
+          hostRef.current = loaded.host
+          setHost(loaded.host)
+          setTvName(loaded.name ?? 'LG NetCast TV')
+          setSelectedTvId('')
         }
-      })
-      .catch(() => setStatus('Bağlantı bilgileri okunamadı.'));
-  }, []);
+         setShowPairing(true)
+         if (loaded.warning) setError(storageReadFailureMessage())
+         setStatus('Eski kayıt geçersiz. TV ile yeniden eşleştirin.')
+        void clearPersistedConnection().catch(() => {
+          if (isCurrent()) setError('Eski kayıt temizlenemedi; yeni eşleştirme yapabilirsiniz.')
+        })
+        return
+      }
+
+      const stored = loaded.connection
+      hostRef.current = stored.host
+      setHost(stored.host)
+      setTvName(stored.name ?? 'LG NetCast TV')
+      setStatus('Kayıtlı TV aranıyor…')
+      if (loaded.warning) setError(storageFailureMessage())
+
+      try {
+        const session = await createSession(stored.host, stored.accessToken, controller.signal)
+        if (!isCurrent()) return
+        const next = { ...stored, session }
+        activateConnection(next, generation)
+        if (loaded.warning) {
+          setError(storageFailureMessage())
+          setStatus('Bağlantı hazır; kayıt uyarısı var.')
+        } else {
+          setStatus('Bağlantı hazır')
+        }
+      } catch (restoreError) {
+        if (!isCurrent() || isAbortErrorKind(restoreError)) return
+        if (isAuthError(restoreError)) {
+          if (!isCurrent()) return
+          setPairingKey('')
+          setShowPairing(true)
+          setError('Kayıtlı eşleştirme anahtarı geçersiz. TV ile yeniden eşleştirin.')
+          setStatus('Yeni eşleştirme bekleniyor.')
+          void clearPersistedConnection().catch(() => {
+            if (isCurrent()) setError('Geçersiz kayıt temizlenemedi; yeni eşleştirme yapabilirsiniz.')
+          })
+        } else {
+          setError(commandFailureMessage(restoreError))
+          setStatus('Kayıtlı TV’ye ulaşılamadı; yeniden deneyebilirsiniz.')
+        }
+      }
+    })()
+
+    return () => {
+      active = false
+      controller.abort()
+      if (restoreControllerRef.current === controller) restoreControllerRef.current = null
+      if (connectionControllerRef.current === controller) connectionControllerRef.current = null
+    }
+  }, [activateConnection])
 
   const scanForTvs = useCallback(async () => {
-    const currentScanId = ++scanId.current;
-    setScanning(true);
-    setDiscoveredTvs([]);
-    setSelectedTvId('');
-    setError('');
-    setStatus('Ağdaki NetCast TV’ler aranıyor…');
+    clearConnectionRuntime()
+    setTvName('LG NetCast TV')
+    setPairingKey('')
+    setShowPairing(false)
+    const currentScanId = ++scanId.current
+    const controller = new AbortController()
+    scanControllerRef.current = controller
+    setScanning(true)
+    setDiscoveredTvs([])
+    listedTvHostsRef.current.clear()
+    setSelectedTvId('')
+    setError('')
+    setStatus('Ağdaki NetCast TV’ler aranıyor…')
 
-    if (Platform.OS === 'web') {
-      setError('Ağ taraması yalnızca fiziksel Android/iOS cihazlarda kullanılabilir. IP adresini elle girebilirsiniz.');
-      setStatus('Elle bağlantı bekleniyor.');
-      setScanning(false);
-      return;
+     if (Platform.OS === 'web') {
+       setError('Ağ taraması ve eşleştirme web tarayıcısında çalışmaz. Fiziksel Android veya iOS cihaz kullanın.')
+       setStatus('Fiziksel cihaz gerekli.')
+       scanControllerRef.current = null
+      setScanning(false)
+      return
     }
 
     try {
-      const foundHosts = new Set<string>();
+      const foundHosts = new Set<string>()
       const addFoundTv = (tv: DiscoveredTv) => {
-        if (foundHosts.has(tv.host)) return;
-        foundHosts.add(tv.host);
-        knownTvAddresses.current.add(tv.host);
-        knownTvIds.current.add(tv.id);
-        setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv));
-      };
+        if (controller.signal.aborted || scanId.current !== currentScanId || foundHosts.has(tv.host)) return
+        foundHosts.add(tv.host)
+        knownTvAddresses.current.add(tv.host)
+        knownTvIds.current.add(tv.id)
+        listedTvHostsRef.current.add(tv.host)
+        setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv))
+      }
 
-      if (isSsdpAvailable) {
-        const interfaces = await getNetworkInterfaces();
-        if (interfaces.length > 0) {
-          for await (const device of searchStream({
-            searchTargets: NETCAST_SEARCH_TARGETS,
-            timeoutMs: SSDP_TIMEOUT_MS,
-            mx: 3,
-            repeatProbe: true,
-            multicastEnabled: Platform.OS === 'android',
-            broadcastEnabled: true,
-          })) {
-            if (scanId.current !== currentScanId) return;
-            const tv = toNetCastTv(device);
-            if (tv) addFoundTv(tv);
+      const unicastTargets = Platform.OS === 'ios' ? Array.from(knownTvAddresses.current) : []
+      const canSearchSsdp = isSsdpAvailable && (Platform.OS === 'android' || unicastTargets.length > 0)
+      if (canSearchSsdp) {
+        const generator = searchStream({
+          searchTargets: NETCAST_SEARCH_TARGETS,
+          timeoutMs: SSDP_TIMEOUT_MS,
+          mx: 3,
+          repeatProbe: true,
+          multicastEnabled: Platform.OS === 'android',
+          broadcastEnabled: Platform.OS === 'android',
+          unicastTargets,
+        })
+        scanGeneratorRef.current = generator
+        try {
+          for await (const device of generator) {
+            if (controller.signal.aborted || scanId.current !== currentScanId) return
+            const tv = toNetCastTv(device)
+            if (tv) addFoundTv(tv)
           }
+        } finally {
+          if (scanGeneratorRef.current === generator) scanGeneratorRef.current = null
         }
       }
 
-      // Some routers drop SSDP and Expo Go does not include custom native
-      // modules. Fall back to probing NetCast's known local HTTP endpoint.
       if (foundHosts.size === 0) {
-        setStatus('SSDP yanıt vermedi; TV adresleri doğrudan kontrol ediliyor…');
-        await scanLocalSubnet((tv) => {
-          if (scanId.current === currentScanId) addFoundTv(tv);
-        });
+        setStatus('SSDP yanıt vermedi; yakın IP adresleri sınırlı olarak kontrol ediliyor…')
+        const localIp = await Network.getIpAddressAsync()
+        if (getSafeScanHosts(localIp).length === 0) throw new Error('NO_LOCAL_SUBNET')
+        await scanLocalSubnet(localIp, addFoundTv, controller.signal)
       }
 
-      if (scanId.current !== currentScanId) return;
+      if (controller.signal.aborted || scanId.current !== currentScanId) return
       setStatus(
         foundHosts.size > 0
           ? `${foundHosts.size} TV bulundu. Eşleştirmek için birini seçin.`
           : 'Tarama tamamlandı.',
-      );
+      )
       if (foundHosts.size === 0) {
-        setError('NetCast TV bulunamadı. Telefonun ve TV’nin aynı Wi‑Fi ağında olduğundan emin olun.');
+        setError('NetCast TV bulunamadı. Yakın IP adresleri tarandı; TV IP adresini elle girebilirsiniz.')
       }
     } catch (scanError) {
-      if (scanId.current !== currentScanId) return;
-      const message = scanError instanceof Error ? scanError.message : '';
+      if (controller.signal.aborted || scanId.current !== currentScanId) return
+      const message = scanError instanceof Error ? scanError.message : ''
       if (message === 'NO_WIFI') {
-        setError('Wi‑Fi bağlantısı bulunamadı. Telefonu TV ile aynı yerel ağa bağlayın.');
-        setStatus('Yerel ağ bağlantısı gerekli.');
+        setError('Wi‑Fi bağlantısı bulunamadı. Telefonu TV ile aynı yerel ağa bağlayın.')
+        setStatus('Yerel ağ bağlantısı gerekli.')
+      } else if (message === 'NO_LOCAL_SUBNET') {
+        setError('Güvenli bir yerel ağ aralığı bulunamadı. TV IP adresini elle girebilirsiniz.')
+        setStatus('Elle bağlantı bekleniyor.')
       } else {
-        setError('Yerel ağ taraması tamamlanamadı. Android ağ izinlerini ve Wi‑Fi bağlantısını kontrol edin.');
-        setStatus('Tarama zaman aşımına uğradı.');
+        setError('Yerel ağ taraması tamamlanamadı. Android ağ izinlerini ve Wi‑Fi bağlantısını kontrol edin.')
+        setStatus('Tarama zaman aşımına uğradı.')
       }
-    } finally {
-      if (scanId.current === currentScanId) setScanning(false);
-    }
-  }, []);
+     } finally {
+       if (scanId.current === currentScanId && scanControllerRef.current === controller) {
+         scanControllerRef.current = null
+         scanGeneratorRef.current = null
+         setScanning(false)
+       }
+     }
+  }, [clearConnectionRuntime])
 
   const markTvOnline = useCallback((event: SsdpNotifyEvent, online: boolean) => {
     setDiscoveredTvs((previous) => {
       const next = previous.map((tv) => {
-        if (!tvMatchesNotification(tv, event)) return tv;
-        return tv.online === online ? tv : { ...tv, online };
-      });
-      return next;
-    });
-  }, []);
+        if (!tvMatchesNotification(tv, event)) return tv
+        return tv.online === online ? tv : { ...tv, online }
+      })
+      return next
+    })
+  }, [])
 
-  const refreshTvFromNotification = useCallback(async (event: SsdpNotifyEvent, generation: number) => {
+  const markTvHostOnline = useCallback((address: string, online: boolean) => {
+    setDiscoveredTvs((previous) => previous.map((tv) => {
+      if (!tvMatchesHost(tv, address)) return tv
+      return tv.online === online ? tv : { ...tv, online }
+    }))
+  }, [])
+
+  const refreshTvFromNotification = useCallback(async (
+    event: SsdpNotifyEvent,
+    generation: number,
+    connectionGeneration: number,
+  ) => {
     if (
-      Platform.OS === 'web' ||
+      Platform.OS !== 'android' ||
       !isSsdpAvailable ||
       liveListenerGeneration.current !== generation ||
+      generationRef.current !== connectionGeneration ||
       refreshingNotificationHosts.current.has(event.address)
     ) {
       return;
     }
 
-    refreshingNotificationHosts.current.add(event.address);
+    refreshingNotificationHosts.current.add(event.address)
+    const generator = searchStream({
+      searchTargets: NETCAST_SEARCH_TARGETS,
+      timeoutMs: 2200,
+      mx: 1,
+      repeatProbe: false,
+      multicastEnabled: false,
+      broadcastEnabled: false,
+      unicastTargets: [event.address],
+    })
+    notificationGeneratorsRef.current.set(event.address, generator)
     try {
-        for await (const device of searchStream({
-          searchTargets: NETCAST_SEARCH_TARGETS,
-        timeoutMs: 2200,
-        mx: 1,
-        repeatProbe: false,
-        multicastEnabled: false,
-        broadcastEnabled: false,
-        unicastTargets: [event.address],
-      })) {
-        const tv = toNetCastTv(device);
-        if (!tv) continue;
+      for await (const device of generator) {
+        const tv = toNetCastTv(device)
+        if (!tv) continue
         if (
           liveListenerGeneration.current !== generation ||
+          generationRef.current !== connectionGeneration ||
           notificationOnlineState.current.get(event.address) !== true
         ) {
-          return;
+          return
         }
-        knownTvAddresses.current.add(tv.host);
-        knownTvIds.current.add(tv.id);
-        setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv));
+        knownTvAddresses.current.add(tv.host)
+        knownTvIds.current.add(tv.id)
+        listedTvHostsRef.current.add(tv.host)
+        setDiscoveredTvs((previous) => upsertDiscoveredTv(previous, tv))
       }
     } catch {
-      // NOTIFY is best-effort; the next announcement or manual scan can retry.
     } finally {
-      refreshingNotificationHosts.current.delete(event.address);
+      if (notificationGeneratorsRef.current.get(event.address) === generator) {
+        notificationGeneratorsRef.current.delete(event.address)
+        refreshingNotificationHosts.current.delete(event.address)
+      }
     }
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      if (Platform.OS === 'web' || !isSsdpAvailable) return;
+      const generation = ++liveListenerGeneration.current
+      let active = true
+      let subscription: { remove: () => void } | undefined
 
-      const generation = ++liveListenerGeneration.current;
-      let active = true;
-      let subscription: { remove: () => void } | undefined;
-      try {
-        subscription = listenForNotifications({
-          onAlive: (event) => {
-            if (!active || liveListenerGeneration.current !== generation) return;
-            const knownDevice =
-              knownTvAddresses.current.has(event.address) ||
-              knownTvIds.current.has(notifyDeviceId(event));
-            if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
-
-            notificationOnlineState.current.set(event.address, true);
-            markTvOnline(event, true);
-            setStatus('NetCast TV listesi güncelleniyor…');
-            void refreshTvFromNotification(event, generation);
-          },
-          onUpdate: (event) => {
-            if (!active || liveListenerGeneration.current !== generation) return;
-            const knownDevice =
-              knownTvAddresses.current.has(event.address) ||
-              knownTvIds.current.has(notifyDeviceId(event));
-            if (!knownDevice && !notifyLooksLikeNetCast(event)) return;
-
-            notificationOnlineState.current.set(event.address, true);
-            markTvOnline(event, true);
-            void refreshTvFromNotification(event, generation);
-          },
-          onByeBye: (event) => {
-            if (!active || liveListenerGeneration.current !== generation) return;
-            const knownDevice =
-              knownTvAddresses.current.has(event.address) ||
-              knownTvIds.current.has(notifyDeviceId(event));
-            if (!knownDevice) return;
-
-            notificationOnlineState.current.set(event.address, false);
-            markTvOnline(event, false);
-            setStatus('Bir NetCast TV çevrimdışı görünüyor.');
-          },
-          onError: () => {
-            if (!active || liveListenerGeneration.current !== generation) return;
-            setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
-          },
-        });
-      } catch {
-        setStatus('Canlı TV takibi başlatılamadı; manuel tarama kullanılabilir.');
+      if (Platform.OS === 'android' && isSsdpAvailable) {
+        try {
+          subscription = listenForNotifications({
+            onAlive: (event) => {
+              if (!active || liveListenerGeneration.current !== generation) return
+              const knownDevice =
+                knownTvAddresses.current.has(event.address) ||
+                knownTvIds.current.has(notifyDeviceId(event))
+              if (!knownDevice && !notifyLooksLikeNetCast(event)) return
+              notificationOnlineState.current.set(event.address, true)
+              markTvOnline(event, true)
+              void refreshTvFromNotification(event, generation, generationRef.current)
+            },
+            onUpdate: (event) => {
+              if (!active || liveListenerGeneration.current !== generation) return
+              const knownDevice =
+                knownTvAddresses.current.has(event.address) ||
+                knownTvIds.current.has(notifyDeviceId(event))
+              if (!knownDevice && !notifyLooksLikeNetCast(event)) return
+              notificationOnlineState.current.set(event.address, true)
+              markTvOnline(event, true)
+              void refreshTvFromNotification(event, generation, generationRef.current)
+            },
+            onByeBye: (event) => {
+              if (!active || liveListenerGeneration.current !== generation || !event.address) return
+              if (!listedTvHostsRef.current.has(event.address)) return
+              notificationOnlineState.current.set(event.address, false)
+              markTvHostOnline(event.address, false)
+            },
+            onError: () => {
+              if (!active || liveListenerGeneration.current !== generation) return
+            },
+          })
+        } catch {
+        }
       }
 
       return () => {
-        active = false;
-        liveListenerGeneration.current += 1;
-        subscription?.remove();
-        refreshingNotificationHosts.current.clear();
-        notificationOnlineState.current.clear();
-      };
-    }, [markTvOnline, refreshTvFromNotification]),
-  );
+        active = false
+        liveListenerGeneration.current += 1
+        cancelScan()
+        cancelNotificationSearches()
+        subscription?.remove()
+        refreshingNotificationHosts.current.clear()
+        notificationOnlineState.current.clear()
+      }
+    }, [cancelNotificationSearches, cancelScan, markTvOnline, markTvHostOnline, refreshTvFromNotification]),
+  )
 
   const selectTv = useCallback((tv: DiscoveredTv) => {
-    if (!tv.online) return;
-    setHost(tv.host);
-    setTvName(tv.name);
-    setPairingKey('');
-    setShowPairing(false);
-    setSelectedTvId(tv.id);
-    setError('');
-    setStatus(`${tv.name} seçildi. TV ekranında kod istemek için devam edin.`);
-  }, []);
+    if (!tv.online) return
+    const nextHost = normalizeHost(tv.host)
+    if (!nextHost) return
+    const changed = hostRef.current.trim() !== nextHost
+    if (changed) {
+      clearConnectionRuntime()
+      hostRef.current = nextHost
+      setHost(nextHost)
+      setTvName('LG NetCast TV')
+      setPairingKey('')
+      setShowPairing(false)
+      setSelectedTvId('')
+    }
+    setTvName(tv.name)
+    setSelectedTvId(tv.id)
+    setError('')
+    setStatus(`${tv.name} seçildi. TV ekranında kod istemek için devam edin.`)
+  }, [clearConnectionRuntime])
+
+  const handleHostChange = useCallback((value: string) => {
+    const changed = hostRef.current.trim() !== value.trim()
+    hostRef.current = value
+    setHost(value)
+    if (!changed) return
+    clearConnectionRuntime()
+    setTvName('LG NetCast TV')
+    setSelectedTvId('')
+    setPairingKey('')
+    setShowPairing(false)
+    setError('')
+  }, [clearConnectionRuntime])
 
   const pair = useCallback(async () => {
-    const cleanHost = host.trim();
-    const cleanKey = pairingKey.trim();
-    setError('');
+    if (Platform.OS === 'web') {
+      setError('Web tarayıcısında TV eşleştirme yapılamaz. Fiziksel Android veya iOS cihaz kullanın.')
+      setStatus('Fiziksel cihaz gerekli.')
+      return
+    }
+    const cleanHost = normalizeHost(host)
+    const cleanKey = pairingKey.trim()
+    setError('')
     if (!cleanHost) {
-      setError('Bir TV seçin veya yerel IP adresini girin. Örnek: 192.168.1.42');
-      return;
-    }
-    if (!cleanKey) {
-      setLoading(true);
-      try {
-        await requestPairingKey(cleanHost);
-        setShowPairing(true);
-        setStatus('TV ekranındaki 6 haneli kodu girin.');
-      } catch {
-        setError('TV’ye ulaşılamadı. Aynı Wi‑Fi ağında olduğunuzu ve NetCast ağ bağlantısının açık olduğunu kontrol edin.');
-      } finally {
-        setLoading(false);
-      }
-      return;
+      setError('Bir TV seçin veya yerel IP adresini girin. Örnek: 192.168.1.42')
+      return
     }
 
-    setLoading(true);
+    clearConnectionRuntime()
+    const generation = generationRef.current
+    const controller = new AbortController()
+    pairingControllerRef.current = controller
+    connectionControllerRef.current = controller
+    setLoading(true)
+
     try {
-      const session = await createSession(cleanHost, cleanKey);
-      const saved: Connection = { host: cleanHost, accessToken: cleanKey, session, name: tvName };
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
-      setConnection(saved);
-      setShowPairing(false);
-      setStatus('Bağlantı hazır');
-    } catch {
-      setError('Kod doğrulanamadı. TV’de görünen kodu eksiksiz girin.');
-    } finally {
-      setLoading(false);
-    }
-  }, [host, pairingKey, tvName]);
+      if (!cleanKey) {
+        await requestPairingKey(cleanHost, controller.signal)
+        if (generation !== generationRef.current || controller.signal.aborted) return
+        hostRef.current = cleanHost
+        setHost(cleanHost)
+        setShowPairing(true)
+        setStatus('TV ekranındaki 6 haneli kodu girin.')
+        return
+      }
 
-  /**
-   * Core key sender — no global busy lock so press-and-hold repeats
-   * (volume / channel) flow without stutter. Single taps wrap this with
-   * the busy indicator via handleCommand.
-   */
-  const fireKey = useCallback(
-    async (command: RemoteCommand, quiet: boolean) => {
-      if (!connection?.session) return;
-      setError('');
+      const session = await createSession(cleanHost, cleanKey, controller.signal)
+      if (generation !== generationRef.current || controller.signal.aborted) return
+      const next: Connection = { host: cleanHost, accessToken: cleanKey, session, name: tvName }
+      activateConnection(next, generation)
+      setStatus('Bağlantı hazır')
+
       try {
-        await sendCommand(connection, command.key);
-        if (!quiet) setStatus(`${command.label} gönderildi`);
+        const saved = await savePersistedConnection(next)
+        if (generation !== generationRef.current) return
+        if (saved.warning) {
+          setError(storageFailureMessage())
+          setStatus('Bağlantı hazır; kayıt bilgileri saklanamadı.')
+        }
       } catch {
-        setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
-        setConnection(null);
-        setStatus('Yeniden bağlanmanız gerekiyor.');
+        if (generation === generationRef.current) {
+          setError(storageFailureMessage())
+          setStatus('Bağlantı hazır; kayıt bilgileri saklanamadı.')
+        }
       }
-    },
-    [connection],
-  );
-
-  const handleCommand = useCallback(
-    async (command: RemoteCommand) => {
-      if (!connection) return;
-      setCommandBusy(true);
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      try {
-        await fireKey(command, false);
-      } finally {
-        setCommandBusy(false);
-      }
-    },
-    [connection, fireKey],
-  );
-
-  const handleRepeatKey = useCallback(
-    (command: RemoteCommand) => {
-      void fireKey(command, true);
-    },
-    [fireKey],
-  );
-
-  // --- Mouse / touchpad -------------------------------------------------
-  // High-frequency relative moves are coalesced (like ConnectSDK's
-  // moveMouse): accumulate deltas, flush at most every 80ms. A single
-  // failed packet must not kill the session, but 3 consecutive failures
-  // mean the session is dead -> surface it like key errors do.
-  const mouseAccum = useRef({ x: 0, y: 0 });
-  const mouseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const mouseFails = useRef(0);
-
-  const flushMouseMove = useCallback(async () => {
-    mouseTimer.current = null;
-    const dx = Math.round(mouseAccum.current.x);
-    const dy = Math.round(mouseAccum.current.y);
-    mouseAccum.current = { x: 0, y: 0 };
-    if ((dx === 0 && dy === 0) || !connection?.session) return;
-    try {
-      await sendTouchMove(connection, dx, dy);
-      mouseFails.current = 0;
-    } catch {
-      mouseFails.current += 1;
-      if (mouseFails.current >= 3) {
-        mouseFails.current = 0;
-        setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
-        setConnection(null);
-        setStatus('Yeniden bağlanmanız gerekiyor.');
+    } catch (pairingError) {
+      if (generation !== generationRef.current || controller.signal.aborted || isAbortErrorKind(pairingError)) return
+      if (isAuthError(pairingError)) {
+        setError('Kod doğrulanamadı. TV’de görünen kodu eksiksiz girin.')
+      } else if (isUnsupportedError(pairingError)) {
+        setError('TV eşleştirme isteğini desteklemiyor.')
       } else {
-        setStatus('Fare hareketi gönderiliyor…');
+        setError('TV’ye ulaşılamadı. Aynı Wi‑Fi ağında olduğunuzu ve NetCast ağ bağlantısının açık olduğunu kontrol edin.')
       }
-    }
-  }, [connection]);
-
-  useEffect(
-    () => () => {
-      if (mouseTimer.current) clearTimeout(mouseTimer.current);
-    },
-    [],
-  );
-
-  const pushMouseMove = useCallback(
-    (dx: number, dy: number) => {
-      mouseAccum.current.x += dx;
-      mouseAccum.current.y += dy;
-      if (!mouseTimer.current) {
-        mouseTimer.current = setTimeout(() => void flushMouseMove(), 80);
-      }
-    },
-    [flushMouseMove],
-  );
-
-  const handleTouchTap = useCallback(async () => {
-    if (!connection) return;
-    setCommandBusy(true);
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    try {
-      if (!connection.session) return;
-      setError('');
-      await sendTouchClick(connection);
-      setStatus('Tık gönderildi');
-    } catch {
-      setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
-      setConnection(null);
-      setStatus('Yeniden bağlanmanız gerekiyor.');
     } finally {
-      setCommandBusy(false);
-    }
-  }, [connection]);
-
-  const handleTouchAction = useCallback(
-    async (direction: 'up' | 'down') => {
-      if (!connection) return;
-      setCommandBusy(true);
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      try {
-        if (!connection.session) return;
-        setError('');
-        await sendTouchWheel(connection, direction);
-        setStatus(direction === 'up' ? 'Yukarı kaydırıldı' : 'Aşağı kaydırıldı');
-      } catch {
-        setError('TV yanıt vermedi. Bağlantı kesilmiş olabilir.');
-        setConnection(null);
-        setStatus('Yeniden bağlanmanız gerekiyor.');
-      } finally {
-        setCommandBusy(false);
+      if (generation === generationRef.current) {
+        setLoading(false)
+        if (pairingControllerRef.current === controller) pairingControllerRef.current = null
       }
-    },
-    [connection],
-  );
+    }
+  }, [activateConnection, clearConnectionRuntime, host, pairingKey, tvName])
+
+  const flushPendingMouseMove = useCallback(() => {
+    if (mouseTimer.current !== null) {
+      clearTimeout(mouseTimer.current)
+      mouseTimer.current = null
+    }
+    const generation = generationRef.current
+    const dx = Math.round(mouseAccum.current.x)
+    const dy = Math.round(mouseAccum.current.y)
+    mouseAccum.current = { x: 0, y: 0 }
+    const current = connectionRef.current
+    const queue = commandQueueRef.current
+    if ((dx === 0 && dy === 0) || !current?.session || !queue) return true
+    try {
+      return queue.enqueueMove(dx, dy)
+    } catch {
+      if (generation === generationRef.current) setStatus('Fare hareketi kuyruğu dolu.')
+      return false
+    }
+  }, [])
+
+  const fireKey = useCallback(async (
+    command: RemoteCommand,
+    quiet: boolean,
+    queueOptions?: { key?: QueueKey; token?: object },
+  ) => {
+    const current = connectionRef.current
+    const queue = commandQueueRef.current
+    const generation = generationRef.current
+    if (!current?.session || !queue) return
+    setError('')
+    flushPendingMouseMove()
+    try {
+      await queue.enqueue((signal) => sendCommand(current, command.key, signal), queueOptions)
+    } catch (error) {
+      if (generation !== generationRef.current || connectionRef.current?.session !== current.session) return
+      if (error instanceof QueueClosedError || isAbortErrorKind(error)) return
+      if (isAuthError(error)) {
+        handleSessionAuthFailure()
+        return
+      }
+      const message = commandFailureMessage(error)
+      setError(message)
+      setStatus(message)
+      return
+    }
+    if (generation !== generationRef.current || connectionRef.current?.session !== current.session) return
+    if (!quiet) setStatus(`${command.label} gönderildi`)
+  }, [flushPendingMouseMove, handleSessionAuthFailure])
+
+  const handleCommand = useCallback(async (command: RemoteCommand) => {
+    const current = connectionRef.current
+    if (!current?.session || commandBusyRef.current) return
+    const generation = generationRef.current
+    commandBusyRef.current = true
+    setCommandBusy(true)
+    try {
+      safeImpactHaptic()
+      await fireKey(command, false)
+    } finally {
+      if (generation === generationRef.current) {
+        commandBusyRef.current = false
+        setCommandBusy(false)
+      }
+    }
+  }, [fireKey])
+
+  const handleRepeatKey = useCallback((command: RemoteCommand, context?: HoldContext) => {
+    if (!context?.repeating) {
+      void fireKey(command, true)
+      return undefined
+    }
+
+    const queue = commandQueueRef.current
+    if (!queue || !connectionRef.current?.session) return undefined
+    let token = repeatTokensRef.current.get(command.key)
+    if (!token) {
+      token = {}
+      repeatTokensRef.current.set(command.key, token)
+    }
+    const repeatToken = token
+    void fireKey(command, true, { key: command.key, token: repeatToken })
+
+    return () => {
+      if (repeatTokensRef.current.get(command.key) !== repeatToken) return
+      repeatTokensRef.current.delete(command.key)
+      queue.cancel(command.key, repeatToken)
+    }
+  }, [fireKey])
+
+  const pushMouseMove = useCallback((dx: number, dy: number) => {
+    if (!connectionRef.current?.session || !commandQueueRef.current) return
+    mouseAccum.current.x = Math.max(-240, Math.min(240, mouseAccum.current.x + dx))
+    mouseAccum.current.y = Math.max(-240, Math.min(240, mouseAccum.current.y + dy))
+    if (mouseTimer.current === null) {
+      mouseTimer.current = setTimeout(flushPendingMouseMove, 80)
+    }
+  }, [flushPendingMouseMove])
+
+  const enqueueTouch = useCallback(async (
+    task: (current: Connection, signal: AbortSignal) => Promise<void>,
+    successMessage: string,
+  ) => {
+    const current = connectionRef.current
+    const queue = commandQueueRef.current
+    if (!current?.session || !queue || commandBusyRef.current) return
+    const generation = generationRef.current
+    commandBusyRef.current = true
+    setCommandBusy(true)
+    try {
+      safeImpactHaptic()
+      setError('')
+      flushPendingMouseMove()
+      await queue.enqueue((signal) => task(current, signal))
+      if (generation !== generationRef.current || connectionRef.current?.session !== current.session) return
+      setStatus(successMessage)
+    } catch (error) {
+      if (generation !== generationRef.current || connectionRef.current?.session !== current.session) return
+      if (error instanceof QueueClosedError || isAbortErrorKind(error)) return
+      if (isAuthError(error)) {
+        handleSessionAuthFailure()
+        return
+      }
+      const message = commandFailureMessage(error)
+      setError(message)
+      setStatus(message)
+    } finally {
+      if (generation === generationRef.current) {
+        commandBusyRef.current = false
+        setCommandBusy(false)
+      }
+    }
+  }, [flushPendingMouseMove, handleSessionAuthFailure])
+
+  const handleTouchTap = useCallback(() => {
+    void enqueueTouch(sendTouchClick, 'Tık gönderildi')
+  }, [enqueueTouch])
+
+  const handleTouchAction = useCallback((direction: 'up' | 'down') => {
+    void enqueueTouch((current, signal) => sendTouchWheel(current, direction, signal), direction === 'up' ? 'Yukarı kaydırıldı' : 'Aşağı kaydırıldı')
+  }, [enqueueTouch])
 
   // --- 3-page pager: [Fare | Kumanda | Sayılar] --------------------------
-  const pageWidth = useWindowDimensions().width;
-  const pagerRef = useRef<ScrollView>(null);
-  const [page, setPage] = useState(1);
-  const [pagerLocked, setPagerLocked] = useState(false);
-  const [pagerHeight, setPagerHeight] = useState(0);
+  const pageWidth = useWindowDimensions().width
+  const pagerRef = useRef<ScrollView>(null)
 
   // Dynamic single-page fit: the D-pad circle grows/shrinks so the whole
   // main page fits the measured pager height with zero scrolling. The
@@ -1273,12 +1507,47 @@ export default function HomeScreen() {
     { index: 2, title: 'Sayılar' },
   ];
 
-  const disconnect = async () => {
-    await AsyncStorage.removeItem(STORAGE_KEY);
-    setConnection(null);
-    setPairingKey('');
-    setStatus('Bağlantı kaldırıldı.');
-  };
+  useEffect(() => () => {
+    generationRef.current += 1
+    pairingControllerRef.current?.abort()
+    restoreControllerRef.current?.abort()
+    connectionControllerRef.current?.abort()
+    connectionControllerRef.current = null
+    pairingControllerRef.current = null
+    restoreControllerRef.current = null
+    cancelScan()
+    cancelNotificationSearches()
+    repeatTokensRef.current.clear()
+    commandQueueRef.current?.clear()
+    commandQueueRef.current = null
+    connectionRef.current = null
+    commandBusyRef.current = false
+    if (mouseTimer.current !== null) clearTimeout(mouseTimer.current)
+    mouseTimer.current = null
+    mouseAccum.current = { x: 0, y: 0 }
+    mouseFails.current = 0
+  }, [cancelNotificationSearches, cancelScan])
+
+  const disconnect = useCallback(() => {
+    clearConnectionRuntime()
+    const generation = generationRef.current
+    setPairingKey('')
+    setShowPairing(false)
+    setSelectedTvId('')
+    setTvName('LG NetCast TV')
+    setError('')
+    setStatus('Bağlantı kaldırıldı.')
+
+    void (async () => {
+      try {
+        await clearPersistedConnection()
+      } catch {
+        if (generation !== generationRef.current) return
+        setError('Bağlantı kaldırıldı; kayıt bilgileri temizlenemedi.')
+        setStatus('Bağlantı kaldırıldı.')
+      }
+    })()
+  }, [clearConnectionRuntime])
 
   return (
     <KeyboardAvoidingView
@@ -1370,12 +1639,15 @@ export default function HomeScreen() {
               </View>
             ) : null}
 
-            <Text style={styles.manualLabel}>VEYA IP ADRESİYLE DEVAM EDİN</Text>
-            <Text style={styles.inputLabel}>TV IP ADRESİ</Text>
+             <Text style={styles.manualLabel}>VEYA IP ADRESİYLE DEVAM EDİN</Text>
+             {Platform.OS === 'web' ? (
+               <Text style={styles.protocolText}>Web üzerinde eşleştirme çalışmaz. Fiziksel Android veya iOS cihaz kullanın.</Text>
+             ) : null}
+             <Text style={styles.inputLabel}>TV IP ADRESİ</Text>
             <TextInput
               testID="tv-ip-input"
               value={host}
-              onChangeText={setHost}
+              onChangeText={handleHostChange}
               placeholder="192.168.1.42"
               placeholderTextColor={colors.mutedForeground}
               autoCapitalize="none"

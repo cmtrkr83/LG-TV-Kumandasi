@@ -2,15 +2,37 @@
   "name": "workspace",
   "version": "0.0.0",
   "license": "MIT",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=24.3.0"
+  },
   "scripts": {
     "preinstall": "node -e \"if(!/pnpm/.test(process.env.npm_config_user_agent||'')){console.error('Use pnpm instead');process.exit(1)}\"",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck:tests": "tsc -p tsconfig.tests.json",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck && pnpm run typecheck:tests",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "verify": "pnpm run codegen:check && pnpm run typecheck && pnpm run test && pnpm run lint && pnpm run format:check",
+    "audit": "pnpm audit --audit-level moderate",
+    "codegen": "pnpm --filter @workspace/api-spec run codegen",
+    "codegen:check": "pnpm --filter @workspace/api-spec run codegen:check",
+    "doctor": "pnpm --filter @workspace/netcast-remote exec expo-doctor"
   },
   "private": true,
   "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "catalog:",
+    "eslint": "10.11.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "expo-doctor": "1.20.4",
+    "globals": "17.12.0",
     "prettier": "^3.9.6",
-    "typescript": "~5.9.3"
+    "typescript": "~6.0.3",
+    "typescript-eslint": "8.70.1",
+    "vite": "catalog:",
+    "vitest": "5.0.1"
   }
 }

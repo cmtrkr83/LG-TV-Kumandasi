@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "composite": false,
+    "jsx": "preserve",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "paths": {
+      "@/*": ["./artifacts/netcast-remote/*"]
+    },
+    "skipLibCheck": true,
+    "target": "es2022",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["tests/**/*.ts", "tests/**/*.mjs", "vitest.config.ts"]
+}

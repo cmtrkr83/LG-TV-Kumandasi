@@ -1,22 +1,66 @@
-import { useEffect, useState, type ComponentType } from "react";
+import {
+  Component,
+  useEffect,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 
-import { modules as discoveredModules } from "./.generated/mockup-components";
+import { resolvePreviewComponent } from "@/lib/preview-component";
+import {
+  modules as discoveredModules,
+  type MockupModuleMap,
+} from "virtual:mockup-components";
 
-type ModuleMap = Record<string, () => Promise<Record<string, unknown>>>;
-
-function _resolveComponent(
-  mod: Record<string, unknown>,
-  name: string,
-): ComponentType | undefined {
-  const fns = Object.values(mod).filter(
-    (v) => typeof v === "function",
-  ) as ComponentType[];
+function PreviewError({ title, message }: { title: string; message: string }) {
   return (
-    (mod.default as ComponentType) ||
-    (mod.Preview as ComponentType) ||
-    (mod[name] as ComponentType) ||
-    fns[fns.length - 1]
+    <main
+      role="alert"
+      aria-live="assertive"
+      className="flex min-h-dvh w-full items-center justify-center overflow-x-hidden bg-background p-4 text-foreground sm:p-8"
+    >
+      <div className="w-full max-w-3xl min-w-0 rounded-lg border border-destructive bg-background p-4 shadow-sm sm:p-6">
+        <h1 className="mb-3 text-lg font-semibold">{title}</h1>
+        <pre className="max-h-[70dvh] overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-relaxed text-foreground">
+          {message}
+        </pre>
+      </div>
+    </main>
   );
+}
+
+type PreviewErrorBoundaryProps = {
+  children: ReactNode;
+  title: string;
+};
+
+type PreviewErrorBoundaryState = {
+  error: Error | null;
+};
+
+class PreviewErrorBoundary extends Component<
+  PreviewErrorBoundaryProps,
+  PreviewErrorBoundaryState
+> {
+  state: PreviewErrorBoundaryState = { error: null };
+
+  static displayName = "PreviewErrorBoundary";
+
+  static getDerivedStateFromError(error: Error): PreviewErrorBoundaryState {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <PreviewError
+          title={this.props.title}
+          message={this.state.error.message}
+        />
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function PreviewRenderer({
@@ -24,7 +68,7 @@ function PreviewRenderer({
   modules,
 }: {
   componentPath: string;
-  modules: ModuleMap;
+  modules: MockupModuleMap;
 }) {
   const [Component, setComponent] = useState<ComponentType | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +80,8 @@ function PreviewRenderer({
     setError(null);
 
     async function loadComponent(): Promise<void> {
-      const key = `./components/mockups/${componentPath}.tsx`;
+      const normalizedComponentPath = componentPath.replace(/\.tsx$/i, "");
+      const key = `./components/mockups/${normalizedComponentPath}.tsx`;
       const loader = modules[key];
       if (!loader) {
         setError(`No component found at ${componentPath}.tsx`);
@@ -44,25 +89,27 @@ function PreviewRenderer({
       }
 
       try {
-        const mod = await loader();
+        const module = await loader();
         if (cancelled) {
           return;
         }
-        const name = componentPath.split("/").pop()!;
-        const comp = _resolveComponent(mod, name);
-        if (!comp) {
+        const fileName =
+          normalizedComponentPath.split("/").at(-1) ?? normalizedComponentPath;
+        const component = resolvePreviewComponent(module, fileName);
+        if (!component) {
           setError(
-            `No exported React component found in ${componentPath}.tsx\n\nMake sure the file has at least one exported function component.`,
+            `No preview component exported from ${componentPath}.tsx. Export one as default, Preview, or ${fileName}.`,
           );
           return;
         }
-        setComponent(() => comp);
-      } catch (e) {
+        setComponent(() => component);
+      } catch (loadError) {
         if (cancelled) {
           return;
         }
 
-        const message = e instanceof Error ? e.message : String(e);
+        const message =
+          loadError instanceof Error ? loadError.message : String(loadError);
         setError(`Failed to load preview.\n${message}`);
       }
     }
@@ -75,20 +122,26 @@ function PreviewRenderer({
   }, [componentPath, modules]);
 
   if (error) {
-    return (
-      <pre style={{ color: "red", padding: "2rem", fontFamily: "system-ui" }}>
-        {error}
-      </pre>
-    );
+    return <PreviewError title="Preview unavailable" message={error} />;
   }
 
-  if (!Component) return null;
+  if (!Component) {
+    return null;
+  }
 
-  return <Component />;
+  return (
+    <PreviewErrorBoundary
+      key={componentPath}
+      title="Preview render failed"
+    >
+      <Component />
+    </PreviewErrorBoundary>
+  );
 }
 
 function getBasePath(): string {
-  return import.meta.env.BASE_URL.replace(/\/$/, "");
+  const decodedBasePath = safeDecodePathname(import.meta.env.BASE_URL);
+  return decodedBasePath ? decodedBasePath.replace(/\/$/, "") : "";
 }
 
 function getPreviewExamplePath(): string {
@@ -98,32 +151,53 @@ function getPreviewExamplePath(): string {
 
 function Gallery() {
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
-      <div className="text-center max-w-md">
-        <h1 className="text-2xl font-semibold text-gray-900 mb-3">
+    <div className="flex min-h-dvh w-full items-center justify-center overflow-x-hidden bg-background p-4 text-foreground sm:p-8">
+      <main className="w-full max-w-xl min-w-0 text-center">
+        <h1 className="mb-3 text-2xl font-semibold text-foreground">
           Component Preview Server
         </h1>
-        <p className="text-gray-500 mb-4">
+        <p className="mb-4 text-foreground/80">
           This server renders individual components for the workspace canvas.
         </p>
-        <p className="text-sm text-gray-400">
+        <p className="text-sm text-muted-foreground">
           Access component previews at{" "}
-          <code className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">
+          <code className="mt-2 block max-w-full overflow-x-auto rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
             {getPreviewExamplePath()}
           </code>
         </p>
-      </div>
+      </main>
     </div>
   );
 }
 
+function safeDecodePathname(pathname: string): string | null {
+  try {
+    const decoded = decodeURIComponent(pathname);
+    if (
+      decoded.includes("\0") ||
+      decoded.includes("\\") ||
+      decoded.split("/").some((segment) => segment === "." || segment === "..")
+    ) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
 function getPreviewPath(): string | null {
   const basePath = getBasePath();
-  const { pathname } = window.location;
+  const decodedPathname = safeDecodePathname(window.location.pathname);
+  if (!decodedPathname) {
+    return null;
+  }
   const local =
-    basePath && pathname.startsWith(basePath)
-      ? pathname.slice(basePath.length) || "/"
-      : pathname;
+    basePath &&
+    (decodedPathname === basePath ||
+      decodedPathname.startsWith(`${basePath}/`))
+      ? decodedPathname.slice(basePath.length) || "/"
+      : decodedPathname;
   const match = local.match(/^\/preview\/(.+)$/);
   return match ? match[1] : null;
 }

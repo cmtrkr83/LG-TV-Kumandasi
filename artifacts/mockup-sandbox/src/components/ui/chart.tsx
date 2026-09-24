@@ -21,6 +21,47 @@ type ChartContextProps = {
 
 const ChartContext = React.createContext<ChartContextProps | null>(null)
 
+const SAFE_CHART_ID = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/
+const SAFE_CHART_KEY = /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/
+
+function isSafeChartColor(value: string): boolean {
+  const color = value.trim()
+  if (
+    !color ||
+    color.length > 256 ||
+    /[;{}<>\[\]\\@!]/.test(color) ||
+    /\/\*|\*\//.test(color) ||
+    /(?:url|image|attr|element|cross-fade)\s*\(/i.test(color)
+  ) {
+    return false
+  }
+
+  if (typeof CSS !== "undefined" && typeof CSS.supports === "function") {
+    return CSS.supports("color", color)
+  }
+
+  let depth = 0
+  for (const character of color) {
+    if (character === "(") {
+      depth += 1
+    } else if (character === ")") {
+      depth -= 1
+      if (depth < 0) {
+        return false
+      }
+    }
+  }
+  return depth === 0
+}
+
+function createChartId(id: string | undefined, uniqueId: string): string {
+  if (id && SAFE_CHART_ID.test(id)) {
+    return `chart-${id}`
+  }
+  const fallback = uniqueId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 128)
+  return `chart-${fallback || "default"}`
+}
+
 function useChart() {
   const context = React.useContext(ChartContext)
 
@@ -41,7 +82,7 @@ const ChartContainer = React.forwardRef<
   }
 >(({ id, className, children, config, ...props }, ref) => {
   const uniqueId = React.useId()
-  const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
+  const chartId = createChartId(id, uniqueId)
 
   return (
     <ChartContext.Provider value={{ config }}>
@@ -65,36 +106,40 @@ const ChartContainer = React.forwardRef<
 ChartContainer.displayName = "Chart"
 
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
-  const colorConfig = Object.entries(config).filter(
-    ([, config]) => config.theme || config.color
-  )
+  if (!SAFE_CHART_ID.test(id)) {
+    return null
+  }
+
+  const colorConfig = Object.entries(config)
+    .filter(
+      ([key, itemConfig]) =>
+        SAFE_CHART_KEY.test(key) && (itemConfig.theme || itemConfig.color)
+    )
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
 
   if (!colorConfig.length) {
     return null
   }
 
-  return (
-    <style
-      dangerouslySetInnerHTML={{
-        __html: Object.entries(THEMES)
-          .map(
-            ([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
-${colorConfig
-  .map(([key, itemConfig]) => {
-    const color =
-      itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
-      itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
-  })
-  .join("\n")}
-}
-`
-          )
-          .join("\n"),
-      }}
-    />
-  )
+  const css = Object.entries(THEMES)
+    .map(([theme, prefix]) => {
+      const declarations = colorConfig
+        .flatMap(([key, itemConfig]) => {
+          const color =
+            itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
+            itemConfig.color
+          return color && isSafeChartColor(color)
+            ? [`  --color-${key}: ${color.trim()};`]
+            : []
+        })
+        .join("\n")
+
+      return declarations ? `\n${prefix} [data-chart=${id}] {\n${declarations}\n}` : ""
+    })
+    .filter(Boolean)
+    .join("\n")
+
+  return css ? <style dangerouslySetInnerHTML={{ __html: css }} /> : null
 }
 
 const ChartTooltip = RechartsPrimitive.Tooltip
