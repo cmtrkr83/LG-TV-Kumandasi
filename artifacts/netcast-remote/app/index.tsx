@@ -11,6 +11,7 @@ import { Feather } from '@expo/vector-icons'
 import { useFocusEffect } from 'expo-router'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   KeyboardAvoidingView,
   PanResponder,
@@ -25,6 +26,14 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import colors from '@/constants/colors'
+import { LanguageToggle } from '@/components/LanguageToggle'
+import {
+  remoteTestID,
+  useTranslation,
+  type MessageDescriptor,
+  type MessageParams,
+  type TranslationKey,
+} from '@/i18n'
 import {
   isAbortErrorKind,
   isAuthError,
@@ -61,9 +70,28 @@ type DiscoveredTv = {
 
 type RemoteCommand = {
   key: number
-  label: string
+  labelKey: TranslationKey
+  testID: string
+  labelParams?: MessageParams
   icon: keyof typeof Feather.glyphMap
   tone?: 'primary' | 'soft' | 'danger'
+}
+
+function createRemoteCommand(
+  key: number,
+  labelKey: TranslationKey,
+  icon: keyof typeof Feather.glyphMap,
+  tone?: RemoteCommand['tone'],
+  labelParams?: MessageParams,
+): RemoteCommand {
+  return {
+    key,
+    labelKey,
+    labelParams,
+    testID: remoteTestID(labelKey, labelParams),
+    icon,
+    tone,
+  }
 }
 
 type HoldContext = {
@@ -216,20 +244,44 @@ function safeImpactHaptic() {
   }
 }
 
-function commandFailureMessage(error: unknown) {
-  if (error instanceof QueueBackpressureError) return 'TV isteği kuyruğu dolu; kısa süre sonra tekrar deneyin.'
-  if (isUnsupportedError(error)) return 'TV bu komutu desteklemiyor.'
-  if (isTransientError(error)) return 'TV geçici olarak yanıt vermiyor.'
-  if (isAbortErrorKind(error)) return ''
-  return 'TV isteği gönderilemedi.'
+function commandFailureMessage(error: unknown): MessageDescriptor | null {
+  if (error instanceof QueueBackpressureError) return { key: 'error.commandQueueFull' }
+  if (isUnsupportedError(error)) return { key: 'error.commandUnsupported' }
+  if (isTransientError(error)) return { key: 'error.commandTransient' }
+  if (isAbortErrorKind(error)) return null
+  return { key: 'error.commandFailed' }
 }
 
-function storageFailureMessage() {
-  return 'Bağlantı bilgileri cihazda saklanamadı; oturum yine de kullanılabilir.'
+function storageWarningMessage(warning: StorageError): MessageDescriptor {
+  switch (warning.operation) {
+    case 'read':
+    case 'parse':
+    case 'secure-read':
+      return { key: 'error.storageRead' }
+    case 'remove':
+    case 'legacy-remove':
+    case 'secure-remove':
+      return { key: 'error.storageCleanup' }
+    case 'write':
+    case 'secure-write':
+      return { key: 'error.storageSave' }
+  }
 }
 
-function storageReadFailureMessage() {
-  return 'Kayıtlı bağlantı bilgileri okunamadı; manuel IP ile devam edebilirsiniz.'
+function storageWarningStatus(warning: StorageError): MessageDescriptor {
+  switch (warning.operation) {
+    case 'read':
+    case 'parse':
+    case 'secure-read':
+      return { key: 'status.storageReadWarning' }
+    case 'remove':
+    case 'legacy-remove':
+    case 'secure-remove':
+      return { key: 'status.storageCleanupWarning' }
+    case 'write':
+    case 'secure-write':
+      return { key: 'status.storageSaveWarning' }
+  }
 }
 
 function IconButton({
@@ -243,11 +295,14 @@ function IconButton({
   disabled?: boolean;
   iconOnly?: boolean;
 }) {
+  const { t } = useTranslation()
+  const label = t(command.labelKey, command.labelParams)
+
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={command.label}
-      testID={`remote-${command.label}`}
+      accessibilityLabel={label}
+      testID={command.testID}
       disabled={disabled}
       onPress={() => onPress(command)}
       style={({ pressed }) => [
@@ -277,11 +332,11 @@ function IconButton({
             command.tone === 'primary' && styles.primaryLabel,
           ]}
         >
-          {command.label}
+          {label}
         </Text>
       )}
     </Pressable>
-  );
+  )
 }
 
 function SectionCaption({ children }: { children: string }) {
@@ -312,6 +367,8 @@ function PressHoldButton({
   /** Divider line under this half (used for the top half of a rocker). */
   seam?: boolean;
 }) {
+  const { t } = useTranslation()
+  const label = t(command.labelKey, command.labelParams)
   const timers = useRef<{ delay?: ReturnType<typeof setTimeout>; repeat?: ReturnType<typeof setInterval> }>({})
   const cancelRef = useRef<(() => void) | null>(null)
 
@@ -332,8 +389,9 @@ function PressHoldButton({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${command.label} (basılı tutunca tekrarlar)`}
-      testID={`remote-${command.label}`}
+      accessibilityLabel={label}
+      accessibilityHint={t('a11y.holdRepeatHint')}
+      testID={command.testID}
       disabled={disabled}
       onPressIn={() => {
         if (disabled) return
@@ -360,7 +418,7 @@ function PressHoldButton({
     >
       <Feather name={command.icon} size={22} color={colors.foreground} />
       <Text numberOfLines={2} style={styles.buttonLabel}>
-        {command.label}
+        {label}
       </Text>
     </Pressable>
   );
@@ -375,11 +433,14 @@ function NumberKey({
   onPress: (digit: string) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation()
+  const label = t('command.digit', { digit })
+
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Rakam ${digit}`}
-      testID={`remote-sayi-${digit}`}
+      accessibilityLabel={label}
+      testID={remoteTestID('command.digit', { digit })}
       disabled={disabled}
       onPress={() => onPress(digit)}
       style={({ pressed }) => [
@@ -415,6 +476,7 @@ function TouchPad({
   onActiveChange: (active: boolean) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation()
   const [touching, setTouching] = useState(false)
   const gesture = useRef({ lastX: 0, lastY: 0, startT: 0 })
   const disabledRef = useRef(disabled)
@@ -471,7 +533,7 @@ function TouchPad({
   return (
     <View
       accessibilityRole="button"
-      accessibilityLabel="Fare paneli. Sürükleyince imleç hareket eder, dokununca tıklanır."
+      accessibilityLabel={t('touchpad.accessibility')}
       testID="fare-paneli"
       {...pan.panHandlers}
       style={[styles.touchpad, touching && styles.touchpadActive]}
@@ -482,28 +544,33 @@ function TouchPad({
         color={touching ? colors.primary : colors.mutedForeground}
       />
       <Text style={styles.touchpadHint}>
-        {touching ? 'Hareket ediyor…' : 'Sürükle: imleci hareket ettir · Dokun: tıkla'}
+        {touching ? t('touchpad.active') : t('touchpad.idle')}
       </Text>
     </View>
   );
 }
 
 function ColorKey({
-  label,
+  labelKey,
+  labelParams,
   dotColor,
   onPress,
   disabled,
 }: {
-  label: string;
+  labelKey: TranslationKey;
+  labelParams?: MessageParams;
   dotColor: string;
   onPress: () => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation()
+  const label = t(labelKey, labelParams)
+
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
-      testID={`remote-${label}`}
+      testID={remoteTestID(labelKey, labelParams)}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [styles.colorKey, pressed && styles.pressed, disabled && styles.disabled]}
@@ -513,7 +580,7 @@ function ColorKey({
         {label}
       </Text>
     </Pressable>
-  );
+  )
 }
 
 /**
@@ -541,10 +608,10 @@ const NUM_PAD: { digit: string; key: number }[] = [
 ];
 
 function numberCommand(digit: string): RemoteCommand | null {
-  const entry = NUM_PAD.find((item) => item.digit === digit);
-  if (entry) return { key: entry.key, label: `Rakam ${digit}`, icon: 'hash' };
-  if (digit === '0') return { key: COMMANDS.NUM_0, label: 'Rakam 0', icon: 'hash' };
-  return null;
+  const entry = NUM_PAD.find((item) => item.digit === digit)
+  if (entry) return createRemoteCommand(entry.key, 'command.digit', 'hash', undefined, { digit })
+  if (digit === '0') return createRemoteCommand(COMMANDS.NUM_0, 'command.digit', 'hash', undefined, { digit })
+  return null
 }
 
 /** Right page (swipe left): direct channel entry + channel tasks. */
@@ -555,27 +622,28 @@ function NumberPadPage({
   onCommand: (command: RemoteCommand) => void;
   busy: boolean;
 }) {
+  const { t } = useTranslation()
   const pressDigit = (digit: string) => {
-    const command = numberCommand(digit);
+    const command = numberCommand(digit)
     if (command) onCommand(command);
   };
 
   return (
     <View style={styles.remotePanel}>
-      <SectionCaption>RAKAMLAR</SectionCaption>
+      <SectionCaption>{t('section.numbers')}</SectionCaption>
       <View style={styles.numberGrid}>
         {NUM_PAD.map((item) => (
           <NumberKey key={item.digit} digit={item.digit} onPress={pressDigit} disabled={busy} />
         ))}
-        <IconButton command={{ key: COMMANDS.DASH, label: 'Tire', icon: 'minus' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.DASH, 'command.dash', 'minus')} onPress={onCommand} disabled={busy} />
         <NumberKey digit="0" onPress={pressDigit} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.FAVORITE, label: 'Favori', icon: 'star' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.FAVORITE, 'command.favorite', 'star')} onPress={onCommand} disabled={busy} />
       </View>
-      <SectionCaption>KANAL</SectionCaption>
+      <SectionCaption>{t('section.channel')}</SectionCaption>
       <View style={styles.tripleRow}>
-        <IconButton command={{ key: COMMANDS.PREV_CHANNEL, label: 'Önceki Kanal', icon: 'rotate-ccw' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.CHANNEL_LIST, label: 'Kanal Listesi', icon: 'list' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.GUIDE, label: 'Rehber', icon: 'calendar' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.PREV_CHANNEL, 'command.previousChannel', 'rotate-ccw')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.CHANNEL_LIST, 'command.channelList', 'list')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.GUIDE, 'command.guide', 'calendar')} onPress={onCommand} disabled={busy} />
       </View>
     </View>
   );
@@ -593,8 +661,9 @@ function RemotePad({
   /** D-pad circle diameter, computed from measured pager height. */
   padSize: number;
 }) {
-  const press = (key: number, label: string, icon: keyof typeof Feather.glyphMap, tone?: RemoteCommand['tone']) =>
-    onCommand({ key, label, icon, tone });
+  const { t } = useTranslation()
+  const press = (key: number, labelKey: TranslationKey, icon: keyof typeof Feather.glyphMap, tone?: RemoteCommand['tone']) =>
+    onCommand(createRemoteCommand(key, labelKey, icon, tone))
   const arrowLen = Math.round(padSize * 0.29);
   const okD = Math.round(padSize * 0.4);
 
@@ -603,22 +672,22 @@ function RemotePad({
       {/* 1 — System */}
       <View style={styles.quadRow}>
         <IconButton
-          command={{ key: COMMANDS.POWER, label: 'Güç', icon: 'power', tone: 'danger' }}
+          command={createRemoteCommand(COMMANDS.POWER, 'command.power', 'power', 'danger')}
           onPress={onCommand}
           disabled={busy}
         />
         <IconButton
-          command={{ key: COMMANDS.QUICK_MENU, label: 'Hızlı Menü', icon: 'sliders', tone: 'soft' }}
+          command={createRemoteCommand(COMMANDS.QUICK_MENU, 'command.quickMenu', 'sliders', 'soft')}
           onPress={onCommand}
           disabled={busy}
         />
         <IconButton
-          command={{ key: COMMANDS.INPUT, label: 'Giriş', icon: 'monitor', tone: 'soft' }}
+          command={createRemoteCommand(COMMANDS.INPUT, 'command.input', 'monitor', 'soft')}
           onPress={onCommand}
           disabled={busy}
         />
         <IconButton
-          command={{ key: COMMANDS.APPS, label: 'Apps', icon: 'grid', tone: 'soft' }}
+          command={createRemoteCommand(COMMANDS.APPS, 'command.apps', 'grid', 'soft')}
           onPress={onCommand}
           disabled={busy}
         />
@@ -630,17 +699,17 @@ function RemotePad({
           while held. */}
       <View style={styles.clusterRow}>
         <View style={styles.navSide}>
-          <Text style={styles.sideCaption}>SES</Text>
+          <Text style={styles.sideCaption}>{t('section.volume')}</Text>
           <View style={styles.rockerPill}>
             <PressHoldButton
-              command={{ key: COMMANDS.VOLUME_UP, label: 'Ses artır', icon: 'plus' }}
+              command={createRemoteCommand(COMMANDS.VOLUME_UP, 'command.volumeUp', 'plus')}
               onHold={onRepeatKey}
               disabled={busy}
               flat
               seam
             />
             <PressHoldButton
-              command={{ key: COMMANDS.VOLUME_DOWN, label: 'Ses azalt', icon: 'minus' }}
+              command={createRemoteCommand(COMMANDS.VOLUME_DOWN, 'command.volumeDown', 'minus')}
               onHold={onRepeatKey}
               disabled={busy}
               flat
@@ -651,50 +720,50 @@ function RemotePad({
           <View style={[styles.padCircle, { width: padSize, height: padSize }]}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Yukarı"
-              testID="remote-yukari"
+              accessibilityLabel={t('command.up')}
+               testID={remoteTestID('command.up')}
               disabled={busy}
-              onPress={() => press(COMMANDS.UP, 'Yukarı', 'chevron-up')}
+              onPress={() => press(COMMANDS.UP, 'command.up', 'chevron-up')}
               style={({ pressed }) => [styles.padArrowUp, { height: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
             >
               <Feather name="chevron-up" size={30} color={colors.foreground} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Sol"
-              testID="remote-sol"
+              accessibilityLabel={t('command.left')}
+               testID={remoteTestID('command.left')}
               disabled={busy}
-              onPress={() => press(COMMANDS.LEFT, 'Sol', 'chevron-left')}
+              onPress={() => press(COMMANDS.LEFT, 'command.left', 'chevron-left')}
               style={({ pressed }) => [styles.padArrowLeft, { width: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
             >
               <Feather name="chevron-left" size={30} color={colors.foreground} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Tamam"
-              testID="remote-tamam"
+              accessibilityLabel={t('command.ok')}
+               testID={remoteTestID('command.ok')}
               disabled={busy}
-              onPress={() => press(COMMANDS.OK, 'Tamam', 'circle', 'primary')}
+              onPress={() => press(COMMANDS.OK, 'command.ok', 'circle', 'primary')}
               style={({ pressed }) => [styles.okButton, { width: okD, height: okD, borderRadius: okD / 2 }, pressed && styles.pressed]}
             >
-              <Text style={styles.okText}>OK</Text>
+              <Text style={styles.okText}>{t('command.ok')}</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Sağ"
-              testID="remote-sag"
+              accessibilityLabel={t('command.right')}
+               testID={remoteTestID('command.right')}
               disabled={busy}
-              onPress={() => press(COMMANDS.RIGHT, 'Sağ', 'chevron-right')}
+              onPress={() => press(COMMANDS.RIGHT, 'command.right', 'chevron-right')}
               style={({ pressed }) => [styles.padArrowRight, { width: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
             >
               <Feather name="chevron-right" size={30} color={colors.foreground} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Aşağı"
-              testID="remote-asagi"
+              accessibilityLabel={t('command.down')}
+               testID={remoteTestID('command.down')}
               disabled={busy}
-              onPress={() => press(COMMANDS.DOWN, 'Aşağı', 'chevron-down')}
+              onPress={() => press(COMMANDS.DOWN, 'command.down', 'chevron-down')}
               style={({ pressed }) => [styles.padArrowDown, { height: arrowLen }, pressed && styles.pressed, busy && styles.disabled]}
             >
               <Feather name="chevron-down" size={30} color={colors.foreground} />
@@ -702,17 +771,17 @@ function RemotePad({
           </View>
         </View>
         <View style={styles.navSide}>
-          <Text style={styles.sideCaption}>KANAL</Text>
+          <Text style={styles.sideCaption}>{t('section.channelShort')}</Text>
           <View style={styles.rockerPill}>
             <PressHoldButton
-              command={{ key: COMMANDS.CHANNEL_UP, label: 'Kanal artır', icon: 'chevron-up' }}
+              command={createRemoteCommand(COMMANDS.CHANNEL_UP, 'command.channelUp', 'chevron-up')}
               onHold={onRepeatKey}
               disabled={busy}
               flat
               seam
             />
             <PressHoldButton
-              command={{ key: COMMANDS.CHANNEL_DOWN, label: 'Kanal azalt', icon: 'chevron-down' }}
+              command={createRemoteCommand(COMMANDS.CHANNEL_DOWN, 'command.channelDown', 'chevron-down')}
               onHold={onRepeatKey}
               disabled={busy}
               flat
@@ -723,48 +792,48 @@ function RemotePad({
 
       {/* 3 — Navigation */}
       <View style={styles.quadRow}>
-        <IconButton command={{ key: COMMANDS.BACK, label: 'Geri', icon: 'corner-up-left' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.HOME, label: 'Ana Menü', icon: 'home' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.MENU, label: 'Menü', icon: 'menu' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.EXIT, label: 'Çıkış', icon: 'x' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.BACK, 'command.back', 'corner-up-left')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.HOME, 'command.home', 'home')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.MENU, 'command.menu', 'menu')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.EXIT, 'command.exit', 'x')} onPress={onCommand} disabled={busy} />
       </View>
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Sessiz"
-        testID="remote-Sessiz"
+        accessibilityLabel={t('command.mute')}
+         testID={remoteTestID('command.mute')}
         disabled={busy}
-        onPress={() => press(COMMANDS.MUTE, 'Sessiz', 'volume-x')}
+        onPress={() => press(COMMANDS.MUTE, 'command.mute', 'volume-x')}
         style={({ pressed }) => [styles.muteBar, pressed && styles.pressed, busy && styles.disabled]}
       >
         <Feather name="volume-x" size={18} color={colors.foreground} />
-        <Text style={styles.muteBarText}>Sessiz</Text>
+        <Text style={styles.muteBarText}>{t('command.mute')}</Text>
       </Pressable>
 
       {/* 5 — Quick access */}
       <View style={styles.quadRow}>
-        <IconButton command={{ key: COMMANDS.GUIDE, label: 'Rehber', icon: 'calendar' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.CHANNEL_LIST, label: 'Kanal Listesi', icon: 'list' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.INFO, label: 'Bilgi', icon: 'info' }} onPress={onCommand} disabled={busy} />
-        <IconButton command={{ key: COMMANDS.PREV_CHANNEL, label: 'Önceki Kanal', icon: 'rotate-ccw' }} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.GUIDE, 'command.guide', 'calendar')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.CHANNEL_LIST, 'command.channelList', 'list')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.INFO, 'command.info', 'info')} onPress={onCommand} disabled={busy} />
+        <IconButton command={createRemoteCommand(COMMANDS.PREV_CHANNEL, 'command.previousChannel', 'rotate-ccw')} onPress={onCommand} disabled={busy} />
       </View>
 
       {/* 7 — Media transport */}
-      <SectionCaption>MEDYA</SectionCaption>
+      <SectionCaption>{t('section.media')}</SectionCaption>
       <View style={styles.mediaRow}>
-        <IconButton command={{ key: COMMANDS.REWIND, label: 'Geri sar', icon: 'rewind' }} onPress={onCommand} disabled={busy} iconOnly />
-        <IconButton command={{ key: COMMANDS.PLAY, label: 'Oynat', icon: 'play' }} onPress={onCommand} disabled={busy} iconOnly />
-        <IconButton command={{ key: COMMANDS.PAUSE, label: 'Duraklat', icon: 'pause' }} onPress={onCommand} disabled={busy} iconOnly />
-        <IconButton command={{ key: COMMANDS.STOP, label: 'Durdur', icon: 'square' }} onPress={onCommand} disabled={busy} iconOnly />
-        <IconButton command={{ key: COMMANDS.FAST_FORWARD, label: 'İleri sar', icon: 'fast-forward' }} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={createRemoteCommand(COMMANDS.REWIND, 'command.rewind', 'rewind')} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={createRemoteCommand(COMMANDS.PLAY, 'command.play', 'play')} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={createRemoteCommand(COMMANDS.PAUSE, 'command.pause', 'pause')} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={createRemoteCommand(COMMANDS.STOP, 'command.stop', 'square')} onPress={onCommand} disabled={busy} iconOnly />
+        <IconButton command={createRemoteCommand(COMMANDS.FAST_FORWARD, 'command.fastForward', 'fast-forward')} onPress={onCommand} disabled={busy} iconOnly />
       </View>
 
       {/* 8 — Color keys */}
       <View style={styles.colorRow}>
-        <ColorKey label="Kırmızı" dotColor="#E5484D" onPress={() => press(COMMANDS.RED, 'Kırmızı', 'circle')} disabled={busy} />
-        <ColorKey label="Yeşil" dotColor="#30A46C" onPress={() => press(COMMANDS.GREEN, 'Yeşil', 'circle')} disabled={busy} />
-        <ColorKey label="Sarı" dotColor="#F5B638" onPress={() => press(COMMANDS.YELLOW, 'Sarı', 'circle')} disabled={busy} />
-        <ColorKey label="Mavi" dotColor="#3E82F7" onPress={() => press(COMMANDS.BLUE, 'Mavi', 'circle')} disabled={busy} />
+        <ColorKey labelKey="command.red" dotColor="#E5484D" onPress={() => press(COMMANDS.RED, 'command.red', 'circle')} disabled={busy} />
+        <ColorKey labelKey="command.green" dotColor="#30A46C" onPress={() => press(COMMANDS.GREEN, 'command.green', 'circle')} disabled={busy} />
+        <ColorKey labelKey="command.yellow" dotColor="#F5B638" onPress={() => press(COMMANDS.YELLOW, 'command.yellow', 'circle')} disabled={busy} />
+        <ColorKey labelKey="command.blue" dotColor="#3E82F7" onPress={() => press(COMMANDS.BLUE, 'command.blue', 'circle')} disabled={busy} />
       </View>
 
     </View>
@@ -773,12 +842,13 @@ function RemotePad({
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets()
+  const { t } = useTranslation()
   const [connection, setConnection] = useState<Connection | null>(null)
   const [host, setHost] = useState('')
   const [pairingKey, setPairingKey] = useState('')
   const [tvName, setTvName] = useState('LG NetCast TV')
-  const [status, setStatus] = useState('TV IP adresini girerek başlayın.')
-  const [error, setError] = useState('')
+  const [status, setStatus] = useState<MessageDescriptor | null>({ key: 'status.initial' })
+  const [error, setError] = useState<MessageDescriptor | null>(null)
   const [loading, setLoading] = useState(false)
   const [commandBusy, setCommandBusy] = useState(false)
   const [showPairing, setShowPairing] = useState(false)
@@ -814,6 +884,24 @@ export default function HomeScreen() {
 
   const connected = Boolean(connection?.session)
   const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host])
+
+  useEffect(() => {
+    if (!connected || Platform.OS !== 'ios' || !status) return
+    try {
+      AccessibilityInfo.announceForAccessibility(t(status))
+    } catch {
+      return
+    }
+  }, [connected, status, t])
+
+  useEffect(() => {
+    if (!connected || Platform.OS !== 'ios' || !error) return
+    try {
+      AccessibilityInfo.announceForAccessibility(t(error))
+    } catch {
+      return
+    }
+  }, [connected, error, t])
 
   const cancelScan = useCallback(() => {
     scanControllerRef.current?.abort()
@@ -869,11 +957,11 @@ export default function HomeScreen() {
     setShowPairing(true)
     setSelectedTvId('')
     setTvName('LG NetCast TV')
-    setError('TV oturumu sona erdi. Yeni eşleştirme yapın.')
-    setStatus('Yeni eşleştirme bekleniyor.')
+    setError({ key: 'error.sessionExpired' })
+    setStatus({ key: 'status.pairingWaiting' })
     void clearPersistedConnection().catch(() => {
       if (generation !== generationRef.current) return
-      setError('Oturum kapatıldı; kayıt temizlenemedi.')
+      setError({ key: 'error.sessionCleanupFailed' })
     })
   }, [clearConnectionRuntime])
 
@@ -888,7 +976,7 @@ export default function HomeScreen() {
       moveTask: (dx, dy, signal) => sendTouchMove(next, dx, dy, signal),
       onBackpressure: () => {
         if (generation !== generationRef.current) return
-        setStatus('Fare hareketi kuyruğu dolu; bazı hareketler birleştirildi.')
+        setStatus({ key: 'status.mouseBackpressure' })
       },
       onMoveSuccess: () => {
         if (generation === generationRef.current) mouseFails.current = 0
@@ -912,7 +1000,7 @@ export default function HomeScreen() {
           setError(message)
           setStatus(message)
         } else {
-          setStatus('Fare hareketi gönderiliyor…')
+          setStatus({ key: 'status.mouseSending' })
         }
       },
     })
@@ -924,7 +1012,7 @@ export default function HomeScreen() {
     setPairingKey('')
     setShowPairing(false)
     setSelectedTvId('')
-    setError('')
+    setError(null)
     commandBusyRef.current = false
     setCommandBusy(false)
     setPagerLocked(false)
@@ -942,9 +1030,9 @@ export default function HomeScreen() {
      void (async () => {
        if (Platform.OS === 'web') {
          if (isCurrent()) {
-           setError('Web üzerinde TV eşleştirme yapılamaz. Fiziksel Android veya iOS cihaz kullanın.')
-           setStatus('Fiziksel cihaz gerekli.')
-         }
+            setError({ key: 'error.webPairingUnavailable' })
+            setStatus({ key: 'status.physicalDeviceRequired' })
+          }
          return
        }
        let loaded
@@ -952,8 +1040,8 @@ export default function HomeScreen() {
         loaded = await loadPersistedConnection()
       } catch (storageError) {
         if (!isCurrent()) return
-        setError(storageError instanceof StorageError ? storageReadFailureMessage() : 'Bağlantı bilgileri okunamadı.')
-        setStatus('Kayıtlı bağlantı yüklenemedi.')
+        setError(storageError instanceof StorageError ? storageWarningMessage(storageError) : { key: 'error.storageReadGeneric' })
+        setStatus({ key: 'status.storageReadFailed' })
         return
       }
 
@@ -966,11 +1054,11 @@ export default function HomeScreen() {
           setTvName(loaded.name ?? 'LG NetCast TV')
           setSelectedTvId('')
         }
-         setShowPairing(true)
-         if (loaded.warning) setError(storageReadFailureMessage())
-         setStatus('Eski kayıt geçersiz. TV ile yeniden eşleştirin.')
+        setShowPairing(true)
+        if (loaded.warning) setError(storageWarningMessage(loaded.warning))
+        setStatus({ key: 'status.storedConnectionInvalid' })
         void clearPersistedConnection().catch(() => {
-          if (isCurrent()) setError('Eski kayıt temizlenemedi; yeni eşleştirme yapabilirsiniz.')
+          if (isCurrent()) setError({ key: 'error.storedConnectionCleanupFailed' })
         })
         return
       }
@@ -979,8 +1067,8 @@ export default function HomeScreen() {
       hostRef.current = stored.host
       setHost(stored.host)
       setTvName(stored.name ?? 'LG NetCast TV')
-      setStatus('Kayıtlı TV aranıyor…')
-      if (loaded.warning) setError(storageFailureMessage())
+      setStatus({ key: 'status.storedTvSearching' })
+      if (loaded.warning) setError(storageWarningMessage(loaded.warning))
 
       try {
         const session = await createSession(stored.host, stored.accessToken, controller.signal)
@@ -988,10 +1076,10 @@ export default function HomeScreen() {
         const next = { ...stored, session }
         activateConnection(next, generation)
         if (loaded.warning) {
-          setError(storageFailureMessage())
-          setStatus('Bağlantı hazır; kayıt uyarısı var.')
+          setError(storageWarningMessage(loaded.warning))
+          setStatus(storageWarningStatus(loaded.warning))
         } else {
-          setStatus('Bağlantı hazır')
+         setStatus({ key: 'status.connectionReady' })
         }
       } catch (restoreError) {
         if (!isCurrent() || isAbortErrorKind(restoreError)) return
@@ -999,14 +1087,14 @@ export default function HomeScreen() {
           if (!isCurrent()) return
           setPairingKey('')
           setShowPairing(true)
-          setError('Kayıtlı eşleştirme anahtarı geçersiz. TV ile yeniden eşleştirin.')
-          setStatus('Yeni eşleştirme bekleniyor.')
+          setError({ key: 'error.invalidPairingKey' })
+          setStatus({ key: 'status.invalidPairingKey' })
           void clearPersistedConnection().catch(() => {
-            if (isCurrent()) setError('Geçersiz kayıt temizlenemedi; yeni eşleştirme yapabilirsiniz.')
+            if (isCurrent()) setError({ key: 'error.invalidPairingCleanupFailed' })
           })
         } else {
           setError(commandFailureMessage(restoreError))
-          setStatus('Kayıtlı TV’ye ulaşılamadı; yeniden deneyebilirsiniz.')
+          setStatus({ key: 'status.storedTvUnreachable' })
         }
       }
     })()
@@ -1031,12 +1119,12 @@ export default function HomeScreen() {
     setDiscoveredTvs([])
     listedTvHostsRef.current.clear()
     setSelectedTvId('')
-    setError('')
-    setStatus('Ağdaki NetCast TV’ler aranıyor…')
+    setError(null)
+    setStatus({ key: 'status.scanning' })
 
      if (Platform.OS === 'web') {
-       setError('Ağ taraması ve eşleştirme web tarayıcısında çalışmaz. Fiziksel Android veya iOS cihaz kullanın.')
-       setStatus('Fiziksel cihaz gerekli.')
+         setError({ key: 'error.scanWeb' })
+       setStatus({ key: 'status.physicalDeviceRequired' })
        scanControllerRef.current = null
       setScanning(false)
       return
@@ -1078,7 +1166,7 @@ export default function HomeScreen() {
       }
 
       if (foundHosts.size === 0) {
-        setStatus('SSDP yanıt vermedi; yakın IP adresleri sınırlı olarak kontrol ediliyor…')
+        setStatus({ key: 'status.scanSsdpFallback' })
         const localIp = await Network.getIpAddressAsync()
         if (getSafeScanHosts(localIp).length === 0) throw new Error('NO_LOCAL_SUBNET')
         await scanLocalSubnet(localIp, addFoundTv, controller.signal)
@@ -1087,24 +1175,24 @@ export default function HomeScreen() {
       if (controller.signal.aborted || scanId.current !== currentScanId) return
       setStatus(
         foundHosts.size > 0
-          ? `${foundHosts.size} TV bulundu. Eşleştirmek için birini seçin.`
-          : 'Tarama tamamlandı.',
+          ? { key: 'status.scanFound', params: { count: foundHosts.size } }
+          : { key: 'status.scanComplete' },
       )
       if (foundHosts.size === 0) {
-        setError('NetCast TV bulunamadı. Yakın IP adresleri tarandı; TV IP adresini elle girebilirsiniz.')
+        setError({ key: 'error.noTvFound' })
       }
     } catch (scanError) {
       if (controller.signal.aborted || scanId.current !== currentScanId) return
       const message = scanError instanceof Error ? scanError.message : ''
       if (message === 'NO_WIFI') {
-        setError('Wi‑Fi bağlantısı bulunamadı. Telefonu TV ile aynı yerel ağa bağlayın.')
-        setStatus('Yerel ağ bağlantısı gerekli.')
+        setError({ key: 'error.noWifi' })
+        setStatus({ key: 'status.localNetworkRequired' })
       } else if (message === 'NO_LOCAL_SUBNET') {
-        setError('Güvenli bir yerel ağ aralığı bulunamadı. TV IP adresini elle girebilirsiniz.')
-        setStatus('Elle bağlantı bekleniyor.')
+        setError({ key: 'error.noLocalSubnet' })
+        setStatus({ key: 'status.manualConnectionWaiting' })
       } else {
-        setError('Yerel ağ taraması tamamlanamadı. Android ağ izinlerini ve Wi‑Fi bağlantısını kontrol edin.')
-        setStatus('Tarama zaman aşımına uğradı.')
+        setError({ key: 'error.scanFailed' })
+        setStatus({ key: 'status.scanTimeout' })
       }
      } finally {
        if (scanId.current === currentScanId && scanControllerRef.current === controller) {
@@ -1254,8 +1342,8 @@ export default function HomeScreen() {
     }
     setTvName(tv.name)
     setSelectedTvId(tv.id)
-    setError('')
-    setStatus(`${tv.name} seçildi. TV ekranında kod istemek için devam edin.`)
+    setError(null)
+    setStatus({ key: 'status.selectedTv', params: { name: tv.name } })
   }, [clearConnectionRuntime])
 
   const handleHostChange = useCallback((value: string) => {
@@ -1268,20 +1356,20 @@ export default function HomeScreen() {
     setSelectedTvId('')
     setPairingKey('')
     setShowPairing(false)
-    setError('')
+    setError(null)
   }, [clearConnectionRuntime])
 
   const pair = useCallback(async () => {
     if (Platform.OS === 'web') {
-      setError('Web tarayıcısında TV eşleştirme yapılamaz. Fiziksel Android veya iOS cihaz kullanın.')
-      setStatus('Fiziksel cihaz gerekli.')
+      setError({ key: 'error.webPairingUnavailable' })
+      setStatus({ key: 'status.physicalDeviceRequired' })
       return
     }
     const cleanHost = normalizeHost(host)
     const cleanKey = pairingKey.trim()
-    setError('')
+    setError(null)
     if (!cleanHost) {
-      setError('Bir TV seçin veya yerel IP adresini girin. Örnek: 192.168.1.42')
+      setError({ key: 'error.hostRequired' })
       return
     }
 
@@ -1299,7 +1387,7 @@ export default function HomeScreen() {
         hostRef.current = cleanHost
         setHost(cleanHost)
         setShowPairing(true)
-        setStatus('TV ekranındaki 6 haneli kodu girin.')
+        setStatus({ key: 'status.pairingCodeRequested' })
         return
       }
 
@@ -1307,29 +1395,29 @@ export default function HomeScreen() {
       if (generation !== generationRef.current || controller.signal.aborted) return
       const next: Connection = { host: cleanHost, accessToken: cleanKey, session, name: tvName }
       activateConnection(next, generation)
-      setStatus('Bağlantı hazır')
+      setStatus({ key: 'status.connectionReady' })
 
       try {
         const saved = await savePersistedConnection(next)
         if (generation !== generationRef.current) return
         if (saved.warning) {
-          setError(storageFailureMessage())
-          setStatus('Bağlantı hazır; kayıt bilgileri saklanamadı.')
+          setError(storageWarningMessage(saved.warning))
+          setStatus(storageWarningStatus(saved.warning))
         }
       } catch {
         if (generation === generationRef.current) {
-          setError(storageFailureMessage())
-          setStatus('Bağlantı hazır; kayıt bilgileri saklanamadı.')
+          setError({ key: 'error.storageSave' })
+          setStatus({ key: 'status.storageSaveWarning' })
         }
       }
     } catch (pairingError) {
       if (generation !== generationRef.current || controller.signal.aborted || isAbortErrorKind(pairingError)) return
       if (isAuthError(pairingError)) {
-        setError('Kod doğrulanamadı. TV’de görünen kodu eksiksiz girin.')
+        setError({ key: 'error.pairingCodeInvalid' })
       } else if (isUnsupportedError(pairingError)) {
-        setError('TV eşleştirme isteğini desteklemiyor.')
+        setError({ key: 'error.pairingUnsupported' })
       } else {
-        setError('TV’ye ulaşılamadı. Aynı Wi‑Fi ağında olduğunuzu ve NetCast ağ bağlantısının açık olduğunu kontrol edin.')
+        setError({ key: 'error.pairingNetwork' })
       }
     } finally {
       if (generation === generationRef.current) {
@@ -1354,7 +1442,7 @@ export default function HomeScreen() {
     try {
       return queue.enqueueMove(dx, dy)
     } catch {
-      if (generation === generationRef.current) setStatus('Fare hareketi kuyruğu dolu.')
+      if (generation === generationRef.current) setStatus({ key: 'status.mouseQueueFull' })
       return false
     }
   }, [])
@@ -1368,7 +1456,7 @@ export default function HomeScreen() {
     const queue = commandQueueRef.current
     const generation = generationRef.current
     if (!current?.session || !queue) return
-    setError('')
+    setError(null)
     flushPendingMouseMove()
     try {
       await queue.enqueue((signal) => sendCommand(current, command.key, signal), queueOptions)
@@ -1385,7 +1473,12 @@ export default function HomeScreen() {
       return
     }
     if (generation !== generationRef.current || connectionRef.current?.session !== current.session) return
-    if (!quiet) setStatus(`${command.label} gönderildi`)
+    if (!quiet) {
+      setStatus({
+        key: 'status.command.sent',
+        params: { labelKey: command.labelKey, labelParams: command.labelParams },
+      })
+    }
   }, [flushPendingMouseMove, handleSessionAuthFailure])
 
   const handleCommand = useCallback(async (command: RemoteCommand) => {
@@ -1439,7 +1532,7 @@ export default function HomeScreen() {
 
   const enqueueTouch = useCallback(async (
     task: (current: Connection, signal: AbortSignal) => Promise<void>,
-    successMessage: string,
+    successMessage: MessageDescriptor,
   ) => {
     const current = connectionRef.current
     const queue = commandQueueRef.current
@@ -1449,7 +1542,7 @@ export default function HomeScreen() {
     setCommandBusy(true)
     try {
       safeImpactHaptic()
-      setError('')
+      setError(null)
       flushPendingMouseMove()
       await queue.enqueue((signal) => task(current, signal))
       if (generation !== generationRef.current || connectionRef.current?.session !== current.session) return
@@ -1473,11 +1566,14 @@ export default function HomeScreen() {
   }, [flushPendingMouseMove, handleSessionAuthFailure])
 
   const handleTouchTap = useCallback(() => {
-    void enqueueTouch(sendTouchClick, 'Tık gönderildi')
+    void enqueueTouch(sendTouchClick, { key: 'status.touchClickSent' })
   }, [enqueueTouch])
 
   const handleTouchAction = useCallback((direction: 'up' | 'down') => {
-    void enqueueTouch((current, signal) => sendTouchWheel(current, direction, signal), direction === 'up' ? 'Yukarı kaydırıldı' : 'Aşağı kaydırıldı')
+    void enqueueTouch(
+      (current, signal) => sendTouchWheel(current, direction, signal),
+      { key: direction === 'up' ? 'status.scrollUpSent' : 'status.scrollDownSent' },
+    )
   }, [enqueueTouch])
 
   // --- 3-page pager: [Fare | Kumanda | Sayılar] --------------------------
@@ -1502,10 +1598,10 @@ export default function HomeScreen() {
   );
 
   const pages = [
-    { index: 0, title: 'Fare' },
-    { index: 1, title: 'Kumanda' },
-    { index: 2, title: 'Sayılar' },
-  ];
+    { index: 0, titleKey: 'page.touchpad' },
+    { index: 1, titleKey: 'page.remote' },
+    { index: 2, titleKey: 'page.numbers' },
+  ] as const
 
   useEffect(() => () => {
     generationRef.current += 1
@@ -1535,16 +1631,16 @@ export default function HomeScreen() {
     setShowPairing(false)
     setSelectedTvId('')
     setTvName('LG NetCast TV')
-    setError('')
-    setStatus('Bağlantı kaldırıldı.')
+    setError(null)
+    setStatus({ key: 'status.disconnected' })
 
     void (async () => {
       try {
         await clearPersistedConnection()
       } catch {
         if (generation !== generationRef.current) return
-        setError('Bağlantı kaldırıldı; kayıt bilgileri temizlenemedi.')
-        setStatus('Bağlantı kaldırıldı.')
+         setError({ key: 'error.disconnectCleanup' })
+       setStatus({ key: 'status.disconnected' })
       }
     })()
   }, [clearConnectionRuntime])
@@ -1566,8 +1662,9 @@ export default function HomeScreen() {
             </View>
             <View style={styles.headerText}>
               <Text style={styles.eyebrow}>NETCAST REMOTE</Text>
-              <Text style={styles.title}>TV kumandanız.</Text>
+              <Text style={styles.title}>{t('app.title')}</Text>
             </View>
+            <LanguageToggle />
             <View style={[styles.connectionDot, connected && styles.connectionDotOn]} />
           </View>
 
@@ -1575,14 +1672,13 @@ export default function HomeScreen() {
             <View style={styles.setupIcon}>
               <Feather name="wifi" size={24} color={colors.primary} />
             </View>
-            <Text style={styles.cardTitle}>TV’ye bağlanın</Text>
-            <Text style={styles.cardBody}>
-              Telefon ve LG NetCast TV aynı Wi‑Fi ağında olmalı. Önce ağda otomatik arayın veya IP adresini elle girin.
-            </Text>
+            <Text style={styles.cardTitle}>{t('setup.title')}</Text>
+            <Text style={styles.cardBody}>{t('setup.body')}</Text>
 
             <Pressable
               testID="scan-tvs-button"
               accessibilityRole="button"
+              accessibilityLabel={scanning ? t('setup.scanning') : t('setup.scan')}
               disabled={scanning}
               onPress={scanForTvs}
               style={({ pressed }) => [styles.scanButton, pressed && styles.pressed, scanning && styles.disabled]}
@@ -1592,21 +1688,24 @@ export default function HomeScreen() {
               ) : (
                 <Feather name="search" size={18} color={colors.primary} />
               )}
-              <Text style={styles.scanButtonText}>{scanning ? 'Ağ taranıyor…' : 'Ağdaki TV’leri tara'}</Text>
+              <Text style={styles.scanButtonText}>{scanning ? t('setup.scanning') : t('setup.scan')}</Text>
             </Pressable>
 
             {discoveredTvs.length > 0 ? (
               <View style={styles.discoverySection}>
-                <Text style={styles.inputLabel}>BULUNAN TV’LER</Text>
+                <Text style={styles.inputLabel}>{t('setup.discoveryTitle')}</Text>
                 <Text style={styles.discoveryStatus}>
-                  {discoveredTvs.filter((tv) => tv.online).length}/{discoveredTvs.length} çevrimiçi · canlı güncellemeler açık
+                  {t('setup.discoveryStatus', {
+                    online: discoveredTvs.filter((tv) => tv.online).length,
+                    total: discoveredTvs.length,
+                  })}
                 </Text>
                 {discoveredTvs.map((tv) => (
                   <Pressable
                     key={tv.id}
-                    testID={`discovered-tv-${tv.host}`}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${tv.name}, ${tv.host}, ${tv.online ? 'çevrimiçi' : 'çevrimdışı'}`}
+                     testID={`discovered-tv-${tv.host}`}
+                     accessibilityRole="button"
+                     accessibilityLabel={`${tv.name}, ${tv.host}, ${t(tv.online ? 'device.online' : 'device.offline')}`}
                     disabled={!tv.online}
                     onPress={() => selectTv(tv)}
                     style={({ pressed }) => [
@@ -1627,7 +1726,7 @@ export default function HomeScreen() {
                     </View>
                     <View style={styles.tvOptionStatus}>
                       <View style={[styles.tvStatusDot, tv.online ? styles.tvStatusDotOnline : styles.tvStatusDotOffline]} />
-                      <Text style={styles.tvStatusText}>{tv.online ? 'Çevrimiçi' : 'Çevrimdışı'}</Text>
+                      <Text style={styles.tvStatusText}>{t(tv.online ? 'device.online' : 'device.offline')}</Text>
                     </View>
                     <Feather
                       name={selectedTvId === tv.id ? 'check-circle' : 'chevron-right'}
@@ -1639,13 +1738,14 @@ export default function HomeScreen() {
               </View>
             ) : null}
 
-             <Text style={styles.manualLabel}>VEYA IP ADRESİYLE DEVAM EDİN</Text>
-             {Platform.OS === 'web' ? (
-               <Text style={styles.protocolText}>Web üzerinde eşleştirme çalışmaz. Fiziksel Android veya iOS cihaz kullanın.</Text>
-             ) : null}
-             <Text style={styles.inputLabel}>TV IP ADRESİ</Text>
+            <Text style={styles.manualLabel}>{t('setup.manual')}</Text>
+            {Platform.OS === 'web' ? (
+              <Text style={styles.protocolText}>{t('setup.web')}</Text>
+            ) : null}
+            <Text style={styles.inputLabel}>{t('setup.ipLabel')}</Text>
             <TextInput
               testID="tv-ip-input"
+              accessibilityLabel={t('setup.ipLabel')}
               value={host}
               onChangeText={handleHostChange}
               placeholder="192.168.1.42"
@@ -1658,12 +1758,13 @@ export default function HomeScreen() {
 
             {showPairing && (
               <>
-                <Text style={styles.inputLabel}>TV EŞLEŞTİRME KODU</Text>
+                <Text style={styles.inputLabel}>{t('setup.pairingLabel')}</Text>
                 <TextInput
                   testID="pairing-key-input"
+                  accessibilityLabel={t('setup.pairingLabel')}
                   value={pairingKey}
                   onChangeText={setPairingKey}
-                  placeholder="TV ekranındaki 6 haneli kod"
+                  placeholder={t('setup.pairingPlaceholder')}
                   placeholderTextColor={colors.mutedForeground}
                   keyboardType="number-pad"
                   maxLength={8}
@@ -1675,19 +1776,20 @@ export default function HomeScreen() {
             {error ? (
               <View style={styles.errorRow}>
                 <Feather name="alert-circle" size={16} color={colors.destructive} />
-                <Text style={styles.errorText}>{error}</Text>
+                <Text style={styles.errorText}>{t(error)}</Text>
               </View>
             ) : null}
 
             <Pressable
               testID="connect-button"
               accessibilityRole="button"
+              accessibilityLabel={t(showPairing ? 'setup.pair' : 'setup.requestCode')}
               disabled={loading}
               onPress={pair}
               style={({ pressed }) => [styles.connectButton, pressed && styles.pressed, loading && styles.disabled]}
             >
               {loading ? <ActivityIndicator color={colors.primaryForeground} /> : <Feather name="link" size={18} color={colors.primaryForeground} />}
-              <Text style={styles.connectButtonText}>{showPairing ? 'TV’yi eşleştir' : 'TV’den kod iste'}</Text>
+              <Text style={styles.connectButtonText}>{t(showPairing ? 'setup.pair' : 'setup.requestCode')}</Text>
             </Pressable>
 
             <View style={styles.protocolNote}>
@@ -1699,25 +1801,42 @@ export default function HomeScreen() {
       ) : (
         <View style={[styles.connectedRoot, { paddingTop: insets.top + 6, paddingBottom: insets.bottom + 8 }]}>
           <View style={styles.connectedCard}>
-              <View style={styles.tvAvatar}>
-                <Feather name="tv" size={20} color={colors.primary} />
-              </View>
-              <View style={styles.connectedInfo}>
-                <Text style={styles.connectedName}>{tvName}</Text>
-                <Text style={styles.connectedMeta}>{displayHost} · {status}</Text>
-              </View>
-              <Pressable accessibilityRole="button" accessibilityLabel="Bağlantıyı kaldır" onPress={disconnect} style={styles.disconnectButton}>
-                <Feather name="settings" size={18} color={colors.mutedForeground} />
-              </Pressable>
+            <View style={styles.tvAvatar}>
+              <Feather name="tv" size={20} color={colors.primary} />
             </View>
-            {error ? (
-              <View style={styles.errorRow}>
-                <Feather name="alert-circle" size={16} color={colors.destructive} />
-                <Text style={styles.errorText}>{error}</Text>
-              </View>
-            ) : null}
-            <View
-              style={styles.pagerViewport}
+            <View style={styles.connectedInfo}>
+              <Text numberOfLines={1} ellipsizeMode="tail" style={styles.connectedName}>
+                {tvName}
+              </Text>
+              <Text
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                style={styles.connectedMeta}
+                accessibilityLiveRegion="polite"
+              >
+                {displayHost} · {status ? t(status) : ''}
+              </Text>
+            </View>
+            <LanguageToggle />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t('connected.disconnect')}
+              onPress={disconnect}
+              style={styles.disconnectButton}
+            >
+              <Feather name="settings" size={18} color={colors.mutedForeground} />
+            </Pressable>
+          </View>
+             {error ? (
+               <View style={styles.errorRow}>
+                 <Feather name="alert-circle" size={16} color={colors.destructive} />
+                 <Text style={styles.errorText} accessibilityLiveRegion="polite">
+                   {t(error)}
+                 </Text>
+               </View>
+             ) : null}
+             <View
+               style={styles.pagerViewport}
               onLayout={(event) => setPagerHeight(event.nativeEvent.layout.height)}
             >
               <ScrollView
@@ -1735,29 +1854,27 @@ export default function HomeScreen() {
                 {/* Left page — swipe right from main */}
                 <View style={[styles.pagerPage, { width: pageWidth }]}>
                   <View style={[styles.remotePanel, styles.fillPanel]}>
-                    <SectionCaption>FARE</SectionCaption>
+                    <SectionCaption>{t('section.touchpad')}</SectionCaption>
                     <TouchPad
                       onMove={pushMouseMove}
                       onTap={handleTouchTap}
                       onActiveChange={setPagerLocked}
                       disabled={commandBusy}
                     />
-                    <Text style={styles.touchpadNote}>
-                      İmleç görünmüyorsa parmağınızı panelde sürükleyin.
-                    </Text>
+                    <Text style={styles.touchpadNote}>{t('connected.touchNote')}</Text>
                     <View style={styles.tripleRow}>
                       <IconButton
-                        command={{ key: -1, label: 'Tıkla', icon: 'mouse-pointer' }}
+                        command={createRemoteCommand(-1, 'command.click', 'mouse-pointer')}
                         onPress={handleTouchTap}
                         disabled={commandBusy}
                       />
                       <IconButton
-                        command={{ key: -1, label: 'Kaydır ↑', icon: 'chevrons-up' }}
+                        command={createRemoteCommand(-1, 'command.scrollUp', 'chevrons-up')}
                         onPress={() => void handleTouchAction('up')}
                         disabled={commandBusy}
                       />
                       <IconButton
-                        command={{ key: -1, label: 'Kaydır ↓', icon: 'chevrons-down' }}
+                        command={createRemoteCommand(-1, 'command.scrollDown', 'chevrons-down')}
                         onPress={() => void handleTouchAction('down')}
                         disabled={commandBusy}
                       />
@@ -1786,13 +1903,14 @@ export default function HomeScreen() {
                 <Pressable
                   key={item.index}
                   accessibilityRole="button"
-                  accessibilityLabel={`${item.title} sayfasına git`}
+                  accessibilityLabel={t('page.goTo', { page: t(item.titleKey) })}
+                  accessibilityState={{ selected: page === item.index }}
                   onPress={() => scrollToPage(item.index)}
                   style={styles.dotItem}
                 >
                   <View style={[styles.dot, page === item.index && styles.dotActive]} />
                   <Text style={[styles.dotLabel, page === item.index && styles.dotLabelActive]}>
-                    {item.title}
+                    {t(item.titleKey)}
                   </Text>
                 </Pressable>
               ))}
@@ -1854,9 +1972,9 @@ const styles = StyleSheet.create({
   errorText: { flex: 1, color: colors.destructive, fontSize: 13, lineHeight: 19 },
   connectedCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.card, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 10, marginBottom: 10 },
   tvAvatar: { width: 42, height: 42, borderRadius: 14, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  connectedInfo: { flex: 1, marginLeft: 11 },
-  connectedName: { color: colors.foreground, fontSize: 15, fontWeight: '700' },
-  connectedMeta: { color: colors.mutedForeground, fontSize: 11, marginTop: 4 },
+  connectedInfo: { flex: 1, minWidth: 0, marginLeft: 11 },
+  connectedName: { minWidth: 0, color: colors.foreground, fontSize: 15, fontWeight: '700' },
+  connectedMeta: { minWidth: 0, color: colors.mutedForeground, fontSize: 11, marginTop: 4 },
   disconnectButton: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center' },
   remotePanel: { backgroundColor: colors.card, borderRadius: 22, borderWidth: 1, borderColor: colors.border, padding: 12 },
   quadRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },

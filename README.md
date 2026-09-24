@@ -39,6 +39,9 @@ pnpm --filter @workspace/mockup-sandbox run dev
 
 CI ve yerel doğrulama için `pnpm run verify`, `pnpm run audit` ve `pnpm run doctor` komutları da kullanılabilir. `verify`, Orval generated-diff kontrolünü, typecheck, test, lint ve format kontrolünü sırayla çalıştırır.
 
+## Dil
+NetCast Kumanda varsayılan olarak Türkçe açılır. Kurulum ekranındaki `TR / EN` anahtarıyla dili anında değiştirebilirsiniz; seçim `netcast-remote-language` AsyncStorage anahtarında saklanır ve sonraki açılışlarda kullanılır. Uygulama metinleri `artifacts/netcast-remote/i18n` içindeki `LanguageProvider` ve `useTranslation` (`t`) hook'u üzerinden çözülür.
+
 ## Ortam Değişkenleri
 - `PUBLIC_ORIGIN` — NetCast static build ve serve için zorunlu canonical origin; origin dışında path, query veya fragment içermez. CI smoke build için `https://example.test` kullanabilir.
 - `BASE_PATH` — NetCast static build/serve ve mockup Vite için güvenli absolute path; varsayılan `/`. `..`, backslash ve geçersiz percent encoding kullanılmaz.
