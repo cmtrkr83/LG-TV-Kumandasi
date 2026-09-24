@@ -6,6 +6,11 @@
     "orientation": "portrait",
     "icon": "./assets/images/netcast-icon.png",
     "scheme": "netcast-remote",
+    "extra": {
+      "eas": {
+        "projectId": "ce49dda1-b91c-4938-88e8-6d2e750fe998"
+      }
+    },
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": false,
