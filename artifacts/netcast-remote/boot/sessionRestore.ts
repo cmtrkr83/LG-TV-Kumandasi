@@ -6,7 +6,10 @@ export const BOOT_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 
 export const MAX_FONT_MULTIPLIER = 1.2;
 
-export function shouldShowRemoteShell(status: StoredStatus, hasStoredHost: boolean): boolean {
+export function shouldShowRemoteShell(
+  status: StoredStatus,
+  hasStoredHost: boolean,
+): boolean {
   if (status === "missing") return false;
   return hasStoredHost;
 }
