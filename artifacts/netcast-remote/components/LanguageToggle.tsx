@@ -2,6 +2,9 @@ import React from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useColors } from '@/hooks/useColors'
 import { useTranslation, type Language } from '@/i18n'
+import { LANGUAGE_TOGGLE_METRICS } from './languageToggleMetrics'
+
+export { LANGUAGE_TOGGLE_METRICS }
 
 type LanguageOption = {
   value: Language
@@ -55,20 +58,21 @@ export function LanguageToggle() {
 
 const styles = StyleSheet.create({
   container: {
-    minHeight: 50,
+    minHeight: LANGUAGE_TOGGLE_METRICS.containerMinHeight,
     borderRadius: 12,
     borderWidth: 1,
-    padding: 3,
+    padding: 2,
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
   },
   option: {
-    minWidth: 44,
-    minHeight: 44,
+    minWidth: LANGUAGE_TOGGLE_METRICS.optionMinWidth,
+    minHeight: LANGUAGE_TOGGLE_METRICS.optionMinHeight,
     borderRadius: 9,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 7,
+    paddingHorizontal: 6,
   },
   separator: {
     fontSize: 12,
