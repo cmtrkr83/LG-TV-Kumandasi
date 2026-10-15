@@ -10,8 +10,22 @@ export function shouldShowRemoteShell(
   status: StoredStatus,
   hasStoredHost: boolean,
 ): boolean {
-  if (status === "missing") return false;
-  return hasStoredHost;
+  return status === "ready" && hasStoredHost;
+}
+
+export function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export function isRetryableRestoreError(kind: NetcastErrorKind): boolean {

@@ -56,8 +56,9 @@ import {
   savePersistedConnection,
   StorageError,
 } from '@/storage/connectionStorage'
-import { BOOT_RETRY_DELAYS_MS, MAX_FONT_MULTIPLIER, getCommandAvailability, isRetryableRestoreError, shouldShowRemoteShell } from '@/boot/sessionRestore'
+import { BOOT_RETRY_DELAYS_MS, MAX_FONT_MULTIPLIER, delayWithAbort, getCommandAvailability, isRetryableRestoreError, shouldShowRemoteShell } from '@/boot/sessionRestore'
 import { isNetcastError } from '@/protocol/netcast'
+import { resolveSameTv } from '@/protocol/tvIdentity'
 
 const SSDP_TIMEOUT_MS = 8000
 
@@ -1113,7 +1114,7 @@ export default function HomeScreen() {
           const retryable = isRetryableRestoreError(kind === 'unknown' ? 'network' : kind)
           if (!retryable || attempt >= BOOT_RETRY_DELAYS_MS.length) break
           setStatus({ key: 'status.storedTvSearching' })
-          await new Promise((resolve) => setTimeout(resolve, BOOT_RETRY_DELAYS_MS[attempt]))
+          await delayWithAbort(BOOT_RETRY_DELAYS_MS[attempt], controller.signal)
         }
       }
       if (isCurrent() && lastRestoreError && !isAuthError(lastRestoreError)) {
@@ -1123,7 +1124,6 @@ export default function HomeScreen() {
           await scanLocalSubnet(localIp, (tv) => {
             found.push(tv)
           }, controller.signal)
-          const { resolveSameTv } = await import('@/protocol/tvIdentity')
           const match = resolveSameTv(found, { host: stored.host, name: stored.name ?? 'LG NetCast TV' })
           if (match && match.host !== stored.host && isCurrent()) {
             const moved = { ...stored, host: match.host, name: match.name || stored.name }
