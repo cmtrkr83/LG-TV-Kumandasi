@@ -56,6 +56,8 @@ import {
   savePersistedConnection,
   StorageError,
 } from '@/storage/connectionStorage'
+import { BOOT_RETRY_DELAYS_MS, isRetryableRestoreError, shouldShowRemoteShell } from '@/boot/sessionRestore'
+import { isNetcastError } from '@/protocol/netcast'
 
 const SSDP_TIMEOUT_MS = 8000
 
@@ -855,6 +857,7 @@ export default function HomeScreen() {
   const [discoveredTvs, setDiscoveredTvs] = useState<DiscoveredTv[]>([])
   const [scanning, setScanning] = useState(false)
   const [selectedTvId, setSelectedTvId] = useState('')
+  const [hasStoredTv, setHasStoredTv] = useState(false)
   const [page, setPage] = useState(1)
   const [pagerLocked, setPagerLocked] = useState(false)
   const [pagerHeight, setPagerHeight] = useState(0)
@@ -883,6 +886,7 @@ export default function HomeScreen() {
   const mouseFails = useRef(0)
 
   const connected = Boolean(connection?.session)
+  const showRemoteShell = connected || hasStoredTv
   const displayHost = useMemo(() => connection?.host ?? host, [connection?.host, host])
 
   useEffect(() => {
@@ -944,6 +948,7 @@ export default function HomeScreen() {
     commandBusyRef.current = false
     clearMouseRuntime()
     setConnection(null)
+    setHasStoredTv(false)
     setCommandBusy(false)
     setPagerLocked(false)
     setScanning(false)
@@ -1053,6 +1058,7 @@ export default function HomeScreen() {
           setHost(loaded.host)
           setTvName(loaded.name ?? 'LG NetCast TV')
           setSelectedTvId('')
+          setHasStoredTv(shouldShowRemoteShell('invalid', true))
         }
         setShowPairing(true)
         if (loaded.warning) setError(storageWarningMessage(loaded.warning))
@@ -1067,36 +1073,50 @@ export default function HomeScreen() {
       hostRef.current = stored.host
       setHost(stored.host)
       setTvName(stored.name ?? 'LG NetCast TV')
+      setHasStoredTv(shouldShowRemoteShell('ready', true))
       setStatus({ key: 'status.storedTvSearching' })
       if (loaded.warning) setError(storageWarningMessage(loaded.warning))
 
-      try {
-        const session = await createSession(stored.host, stored.accessToken, controller.signal)
+      let lastRestoreError: unknown = null
+      for (let attempt = 0; attempt <= BOOT_RETRY_DELAYS_MS.length; attempt += 1) {
         if (!isCurrent()) return
-        const next = { ...stored, session }
-        activateConnection(next, generation)
-        if (loaded.warning) {
-          setError(storageWarningMessage(loaded.warning))
-          setStatus(storageWarningStatus(loaded.warning))
-        } else {
-         setStatus({ key: 'status.connectionReady' })
-        }
-      } catch (restoreError) {
-        if (!isCurrent() || isAbortErrorKind(restoreError)) return
-        if (isAuthError(restoreError)) {
+        try {
+          const session = await createSession(stored.host, stored.accessToken, controller.signal)
           if (!isCurrent()) return
-          setPairingKey('')
-          setShowPairing(true)
-          setError({ key: 'error.invalidPairingKey' })
-          setStatus({ key: 'status.invalidPairingKey' })
-          void clearPersistedConnection().catch(() => {
-            if (isCurrent()) setError({ key: 'error.invalidPairingCleanupFailed' })
-          })
-        } else {
-          setError(commandFailureMessage(restoreError))
-          setStatus({ key: 'status.storedTvUnreachable' })
+          const next = { ...stored, session }
+          activateConnection(next, generation)
+          if (loaded.warning) {
+            setError(storageWarningMessage(loaded.warning))
+            setStatus(storageWarningStatus(loaded.warning))
+          } else {
+            setStatus({ key: 'status.connectionReady' })
+          }
+          return
+        } catch (restoreError) {
+          if (!isCurrent() || isAbortErrorKind(restoreError)) return
+          if (isAuthError(restoreError)) {
+            if (!isCurrent()) return
+            setPairingKey('')
+            setShowPairing(true)
+            setHasStoredTv(false)
+            setError({ key: 'error.invalidPairingKey' })
+            setStatus({ key: 'status.invalidPairingKey' })
+            void clearPersistedConnection().catch(() => {
+              if (isCurrent()) setError({ key: 'error.invalidPairingCleanupFailed' })
+            })
+            return
+          }
+          lastRestoreError = restoreError
+          const kind = isNetcastError(restoreError) ? restoreError.kind : 'unknown'
+          const retryable = isRetryableRestoreError(kind === 'unknown' ? 'network' : kind)
+          if (!retryable || attempt >= BOOT_RETRY_DELAYS_MS.length) break
+          setStatus({ key: 'status.storedTvSearching' })
+          await new Promise((resolve) => setTimeout(resolve, BOOT_RETRY_DELAYS_MS[attempt]))
         }
       }
+      if (!isCurrent()) return
+      setError(commandFailureMessage(lastRestoreError))
+      setStatus({ key: 'status.storedTvUnreachable' })
     })()
 
     return () => {
@@ -1630,6 +1650,7 @@ export default function HomeScreen() {
     setPairingKey('')
     setShowPairing(false)
     setSelectedTvId('')
+    setHasStoredTv(false)
     setTvName('LG NetCast TV')
     setError(null)
     setStatus({ key: 'status.disconnected' })
@@ -1650,7 +1671,7 @@ export default function HomeScreen() {
       style={styles.screen}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      {!connected ? (
+      {!showRemoteShell ? (
         <ScrollView
           contentContainerStyle={[styles.content, { paddingTop: insets.top + 6, paddingBottom: insets.bottom + 8 }]}
           keyboardShouldPersistTaps="handled"
