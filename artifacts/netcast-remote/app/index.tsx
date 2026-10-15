@@ -1114,6 +1114,35 @@ export default function HomeScreen() {
           await new Promise((resolve) => setTimeout(resolve, BOOT_RETRY_DELAYS_MS[attempt]))
         }
       }
+      if (isCurrent() && lastRestoreError && !isAuthError(lastRestoreError)) {
+        try {
+          const localIp = await Network.getIpAddressAsync()
+          const found: { id: string; host: string; name: string; model?: string }[] = []
+          await scanLocalSubnet(localIp, (tv) => {
+            found.push(tv)
+          }, controller.signal)
+          const { resolveSameTv } = await import('@/protocol/tvIdentity')
+          const match = resolveSameTv(found, { host: stored.host, name: stored.name ?? 'LG NetCast TV' })
+          if (match && match.host !== stored.host && isCurrent()) {
+            const moved = { ...stored, host: match.host, name: match.name || stored.name }
+            try {
+              const session = await createSession(moved.host, moved.accessToken, controller.signal)
+              if (!isCurrent()) return
+              await savePersistedConnection(moved)
+              hostRef.current = moved.host
+              setHost(moved.host)
+              setTvName(moved.name ?? 'LG NetCast TV')
+              activateConnection({ ...moved, session }, generation)
+              setStatus({ key: 'status.connectionReady' })
+              return
+            } catch {
+              // Fall through to unreachable status below.
+            }
+          }
+        } catch {
+          // Rediscovery is best-effort; unreachable status below covers it.
+        }
+      }
       if (!isCurrent()) return
       setError(commandFailureMessage(lastRestoreError))
       setStatus({ key: 'status.storedTvUnreachable' })
