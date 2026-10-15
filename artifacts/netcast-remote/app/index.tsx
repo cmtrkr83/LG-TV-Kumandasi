@@ -56,7 +56,7 @@ import {
   savePersistedConnection,
   StorageError,
 } from '@/storage/connectionStorage'
-import { BOOT_RETRY_DELAYS_MS, isRetryableRestoreError, shouldShowRemoteShell } from '@/boot/sessionRestore'
+import { BOOT_RETRY_DELAYS_MS, MAX_FONT_MULTIPLIER, getCommandAvailability, isRetryableRestoreError, shouldShowRemoteShell } from '@/boot/sessionRestore'
 import { isNetcastError } from '@/protocol/netcast'
 
 const SSDP_TIMEOUT_MS = 8000
@@ -328,7 +328,9 @@ function IconButton({
       />
       {iconOnly ? null : (
         <Text
-          numberOfLines={2}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+          maxFontSizeMultiplier={MAX_FONT_MULTIPLIER}
           style={[
             styles.buttonLabel,
             command.tone === 'primary' && styles.primaryLabel,
@@ -419,7 +421,7 @@ function PressHoldButton({
       ]}
     >
       <Feather name={command.icon} size={22} color={colors.foreground} />
-      <Text numberOfLines={2} style={styles.buttonLabel}>
+      <Text numberOfLines={1} ellipsizeMode="tail" maxFontSizeMultiplier={MAX_FONT_MULTIPLIER} style={styles.buttonLabel}>
         {label}
       </Text>
     </Pressable>
@@ -1504,7 +1506,10 @@ export default function HomeScreen() {
     const current = connectionRef.current
     const queue = commandQueueRef.current
     const generation = generationRef.current
-    if (!current?.session || !queue) return
+    if (!current?.session || !queue) {
+      if (generation === generationRef.current) setStatus({ key: 'status.storedTvSearching' })
+      return
+    }
     setError(null)
     flushPendingMouseMove()
     try {
@@ -1532,7 +1537,11 @@ export default function HomeScreen() {
 
   const handleCommand = useCallback(async (command: RemoteCommand) => {
     const current = connectionRef.current
-    if (!current?.session || commandBusyRef.current) return
+    if (!current?.session) {
+      setStatus({ key: getCommandAvailability(false).statusKey })
+      return
+    }
+    if (commandBusyRef.current) return
     const generation = generationRef.current
     commandBusyRef.current = true
     setCommandBusy(true)
@@ -1712,7 +1721,7 @@ export default function HomeScreen() {
             </View>
             <View style={styles.headerText}>
               <Text style={styles.eyebrow}>NETCAST REMOTE</Text>
-              <Text style={styles.title}>{t('app.title')}</Text>
+              <Text numberOfLines={1} ellipsizeMode="tail" maxFontSizeMultiplier={MAX_FONT_MULTIPLIER} style={styles.title}>{t('app.title')}</Text>
             </View>
             <LanguageToggle />
             <View style={[styles.connectionDot, connected && styles.connectionDotOn]} />
@@ -1855,12 +1864,13 @@ export default function HomeScreen() {
               <Feather name="tv" size={20} color={colors.primary} />
             </View>
             <View style={styles.connectedInfo}>
-              <Text numberOfLines={1} ellipsizeMode="tail" style={styles.connectedName}>
+              <Text numberOfLines={1} ellipsizeMode="tail" maxFontSizeMultiplier={MAX_FONT_MULTIPLIER} style={styles.connectedName}>
                 {tvName}
               </Text>
               <Text
                 numberOfLines={1}
                 ellipsizeMode="tail"
+                maxFontSizeMultiplier={MAX_FONT_MULTIPLIER}
                 style={styles.connectedMeta}
                 accessibilityLiveRegion="polite"
               >
@@ -2029,10 +2039,10 @@ const styles = StyleSheet.create({
   remotePanel: { backgroundColor: colors.card, borderRadius: 22, borderWidth: 1, borderColor: colors.border, padding: 12 },
   quadRow: { flexDirection: 'row', gap: 8, marginBottom: 10 },
   tripleRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },
-  iconButton: { flex: 1, minHeight: 48, borderRadius: 14, backgroundColor: colors.secondary, alignItems: 'center', justifyContent: 'center', gap: 4, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 4 },
+  iconButton: { flex: 1, flexShrink: 1, minWidth: 0, minHeight: 48, borderRadius: 14, backgroundColor: colors.secondary, alignItems: 'center', justifyContent: 'center', gap: 4, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 4 },
   primaryButton: { backgroundColor: colors.primary, borderColor: colors.primary },
   dangerButton: { backgroundColor: '#49252C', borderColor: '#71343C' },
-  buttonLabel: { color: colors.foreground, fontSize: 10, fontWeight: '600', textAlign: 'center' },
+  buttonLabel: { color: colors.foreground, fontSize: 10, fontWeight: '600', textAlign: 'center', flexShrink: 1 },
   primaryLabel: { color: colors.primaryForeground },
   sectionCaption: { color: colors.mutedForeground, fontSize: 10, fontWeight: '700', letterSpacing: 1.4, marginBottom: 8, marginLeft: 4 },
   pressed: { opacity: 0.66, transform: [{ scale: 0.97 }] },
